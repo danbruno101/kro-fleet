@@ -1,0 +1,22 @@
+# One GenAIService, authored once on the hub, placed onto every member whose
+# ClusterProfile carries tier=prod. The template.spec is the sister repo's
+# developer-facing GenAIService spec, passed through verbatim — kro on each
+# member expands it, resolving per-cloud details (e.g. StorageClass) from that
+# member's ClusterPlatform.
+apiVersion: fleet.kro.run/v1alpha1
+kind: FleetGenAIService
+metadata:
+  name: demo-llm
+  namespace: fleet-demo
+spec:
+  placement:
+    clusterSelector:
+      matchLabels:
+        tier: prod
+    tolerance:
+      minReadyClusters: 1
+  template:
+    spec:
+      model: mock-vllm
+      image: ghcr.io/danbruno101/mock-vllm:demo
+      replicas: 1

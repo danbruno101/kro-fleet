@@ -20,7 +20,9 @@ thinking the PoC *is* the finished native design.
 | **Placement** | Extensible `placement.strategy` (spread, capacity, drain/evacuate) | **Label selector only** | Matches the KEP's v1 scope; strategies are reserved future work. |
 | **Distribution model** | Design allows push or pull | **Push** (hub → member API via multicluster-runtime) only | Pull-mode agent out of scope for the PoC. |
 | **Status aggregation** | Rolled-up conditions + per-member `status.clusters[]` | Implemented (may be simplified) | Track any simplifications here as they happen. |
-| **Cross-cluster GC** | Native ownership/finalizer semantics | Hub-side applied-manifest tracking + finalizer | Same idea as OCM `ManifestWork`; document any edge cases skipped. |
+| **Cross-cluster GC** | Native ownership/finalizer semantics | Hub-side tracking + finalizer (`fleet.kro.run/cleanup`). Edge case: a member whose ClusterProfile is deleted **before** cleanup is skipped — its copy is orphaned on that (now unreachable) member | Same idea as OCM `ManifestWork`. A registered-but-unreachable member correctly blocks finalization and retries. |
+| **Applied-manifest inventory** | A dedicated per-`(instance, member)` manifest inventory (like OCM `AppliedManifestWork`) | **`status.clusters[]` doubles as the inventory** — valid because the PoC places exactly one object (the GenAIService) per member; intent is persisted *before* touching members so a crash cannot orphan an untracked copy | A real implementation needs a separate record keyed by GVK/name per member. |
+| **Member readiness** | kro-defined instance readiness contract | **Heuristic**: `status.state == ACTIVE`, else a true `Ready`/`InstanceSynced` condition | Matches stock kro's instance status; revisit when phase 2 runs real kro on members. |
 | **Scale** | Fleet-scale (many clusters) | A handful of **kind** clusters on a laptop | PoC proves correctness, not scale. |
 
 ## What the PoC *does* faithfully prove
