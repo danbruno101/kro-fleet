@@ -47,7 +47,7 @@ import (
 
 func main() {
 	var hubKubeconfig, hubContext, fleetNamespace, consumerName string
-	flag.StringVar(&hubKubeconfig, "hub-kubeconfig", os.Getenv("KUBECONFIG"), "path to a kubeconfig with hub access (in-cluster config if empty)")
+	flag.StringVar(&hubKubeconfig, "hub-kubeconfig", "", "path to a kubeconfig with hub access (default: $KUBECONFIG, then ~/.kube/config, then in-cluster)")
 	flag.StringVar(&hubContext, "hub-context", "", "kubeconfig context of the hub cluster (current context if empty)")
 	flag.StringVar(&fleetNamespace, "fleet-namespace", "fleet-system", "hub namespace holding ClusterProfiles and kubeconfig Secrets")
 	flag.StringVar(&consumerName, "consumer-name", "kro-fleet", "cluster-inventory consumer name for the Secret kubeconfig strategy")
@@ -65,18 +65,23 @@ func main() {
 func run(hubKubeconfig, hubContext, fleetNamespace, consumerName string) error {
 	ctx := signals.SetupSignalHandler()
 
-	var hubCfg *rest.Config
-	var err error
-	if hubKubeconfig == "" {
-		hubCfg, err = rest.InClusterConfig()
-	} else {
-		hubCfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			&clientcmd.ClientConfigLoadingRules{ExplicitPath: hubKubeconfig},
-			&clientcmd.ConfigOverrides{CurrentContext: hubContext},
-		).ClientConfig()
-	}
+	// Standard loading order: --hub-kubeconfig, else $KUBECONFIG, else
+	// ~/.kube/config, else in-cluster (when running on the hub itself).
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	loadingRules.ExplicitPath = hubKubeconfig
+	hubCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules,
+		&clientcmd.ConfigOverrides{CurrentContext: hubContext},
+	).ClientConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load hub config: %w", err)
+		if hubKubeconfig == "" && hubContext == "" {
+			var inClusterErr error
+			if hubCfg, inClusterErr = rest.InClusterConfig(); inClusterErr != nil {
+				return fmt.Errorf("failed to load hub config from kubeconfig (%v) or in-cluster (%v)", err, inClusterErr)
+			}
+		} else {
+			return fmt.Errorf("failed to load hub config: %w", err)
+		}
 	}
 
 	scheme := runtime.NewScheme()

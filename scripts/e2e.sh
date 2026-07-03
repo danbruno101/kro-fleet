@@ -38,11 +38,16 @@ fail() {
   exit 1
 }
 
+controller_alive() {
+  [ -z "$CTRL_PID" ] || kill -0 "$CTRL_PID" 2>/dev/null || fail "fleet controller exited prematurely"
+}
+
 # wait_for <timeout-seconds> <description> <command...>   (command must succeed)
 wait_for() {
   local timeout=$1 desc=$2; shift 2
   local deadline=$(( $(date +%s) + timeout ))
   until "$@" >/dev/null 2>&1; do
+    controller_alive
     [ "$(date +%s)" -ge "$deadline" ] && fail "timed out waiting for: $desc"
     sleep 5
   done
@@ -54,6 +59,7 @@ wait_gone() {
   local timeout=$1 desc=$2; shift 2
   local deadline=$(( $(date +%s) + timeout ))
   while "$@" >/dev/null 2>&1; do
+    controller_alive
     [ "$(date +%s)" -ge "$deadline" ] && fail "timed out waiting for: $desc"
     sleep 5
   done
