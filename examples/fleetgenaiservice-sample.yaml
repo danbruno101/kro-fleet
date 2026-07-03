@@ -1,8 +1,9 @@
 # One GenAIService, authored once on the hub, placed onto every member whose
-# ClusterProfile carries tier=prod. The template.spec is the sister repo's
-# developer-facing GenAIService spec, passed through verbatim — kro on each
-# member expands it, resolving per-cloud details (e.g. StorageClass) from that
-# member's ClusterPlatform.
+# ClusterProfile carries tier=prod. template.spec is the sister repo's
+# developer-facing GenAIService spec, passed through verbatim — stock kro on
+# each member expands it into PVC/Deployment/Service(s), resolving the
+# per-cloud StorageClass from that member's ClusterPlatform config. The
+# developer YAML never names a cluster or a cloud.
 apiVersion: fleet.kro.run/v1alpha1
 kind: FleetGenAIService
 metadata:
@@ -17,6 +18,9 @@ spec:
       minReadyClusters: 1
   template:
     spec:
-      model: mock-vllm
-      image: ghcr.io/danbruno101/mock-vllm:demo
+      name: demo-llm
+      model: "Qwen/Qwen2.5-0.5B-Instruct"
+      mode: mock          # CPU-only mock server; flip to "gpu" on real clusters
       replicas: 1
+      cacheSize: 1Gi
+      monitoring: true
