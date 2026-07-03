@@ -1,0 +1,57 @@
+# Hermetic CI for the kro-fleet PoC: no cloud, no GPU, no secrets.
+# The e2e job is the PoC's proof — it runs scripts/e2e.sh, which stands up
+# 1 hub + 2 member kind clusters and asserts all six success criteria from
+# CLAUDE.md against stock kro on the members.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  KIND_VERSION: v0.32.0
+  KUBECTL_VERSION: v1.36.2
+  HELM_VERSION: v4.2.2
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build, vet, generated-code drift, unit tests
+        run: |
+          go build ./...
+          go vet ./...
+          go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/...
+          go tool controller-gen crd paths=./api/... output:crd:dir=config/crd
+          git diff --exit-code -- api config/crd || { echo "generated code drifted: run controller-gen and commit"; exit 1; }
+          go test ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install pinned kind / kubectl / helm
+        run: |
+          GOBIN=/usr/local/bin go install sigs.k8s.io/kind@${KIND_VERSION}
+          curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && sudo chmod +x /usr/local/bin/kubectl
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+          kind version && kubectl version --client && helm version --short
+      - name: Run e2e (1 hub + 2 members, all six success criteria)
+        run: PRELOAD_IMAGES=true scripts/e2e.sh
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kind get clusters || true
+          for c in $(kind get clusters 2>/dev/null); do
+            echo "=== $c: nodes/pods ==="
+            kubectl --context "kind-$c" get nodes,pods -A || true
+          done

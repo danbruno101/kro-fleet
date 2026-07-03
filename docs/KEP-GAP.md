@@ -26,6 +26,9 @@ thinking the PoC *is* the finished native design.
 | **Scale** | Fleet-scale (many clusters) | A handful of **kind** clusters on a laptop | PoC proves correctness, not scale. |
 
 ## What the PoC *does* faithfully prove
+
+Everything below is asserted by `scripts/e2e.sh` (the same script CI runs), on
+kind, against **stock kro 0.9.2** expanding the placed objects on the members.
 - One placement-enabled object on a hub, placed onto matching members, with
   aggregated status — the core UX of the KEP.
 - Integration with **ClusterProfile** (inventory) and **multicluster-runtime**
