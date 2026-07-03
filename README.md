@@ -64,16 +64,20 @@ Change it once, apply it once, it disperses.
              └───────────┘   └───────────┘   └───────────┘
 ```
 
-## Try it (once built)
+## Try it
 
 ```bash
-./scripts/setup-fleet.sh          # 1 hub + N member kind clusters
-kubectl --context kind-hub apply -f examples/fleet-sentiment-api.yaml
-kubectl --context kind-hub get fleetgenaiservice sentiment-api -o yaml   # status.clusters[]
-./scripts/teardown-fleet.sh
+scripts/setup-fleet.sh 2                          # 1 hub + 2 member kind clusters
+go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub &
+kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.yaml
+kubectl --context kind-kro-fleet-hub get fgs demo-llm -n fleet-demo -o yaml   # status.clusters[]
+scripts/e2e.sh                                    # assert all six success criteria
+scripts/teardown-fleet.sh
 ```
 
-See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough.
+See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough, and
+[`docs/phase0-validation.md`](docs/phase0-validation.md) for the pinned
+versions and provider findings this is built on.
 
 ## Related
 
