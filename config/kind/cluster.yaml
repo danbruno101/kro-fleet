@@ -1,0 +1,12 @@
+# Shared kind cluster config for the kro-fleet PoC (hub and members).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+kubeadmConfigPatches:
+  # kubelet >= 1.36 refuses to start on cgroup v1 hosts by default.
+  # This override keeps the clusters bootable in restricted/nested dev
+  # sandboxes that still expose cgroup v1; it is a no-op on cgroup v2
+  # hosts (GitHub Actions runners, modern Linux desktops).
+  - |
+    kind: KubeletConfiguration
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    failCgroupV1: false
