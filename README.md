@@ -83,6 +83,7 @@ versions and provider findings this is built on.
 
 - **Demo (single-cluster portability):** https://github.com/danbruno101/kro-genaiops-demo
 - **The proposal:** [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
+- **The MVP demo plan (3 clusters + Headlamp plugin + recording):** [`docs/proposals/kro-fleet-mvp-plan.md`](docs/proposals/kro-fleet-mvp-plan.md)
 - **Fleet-scale operating model (inspiration):** https://lucy.sh/fleet-scale-kubernetes
 
 ## License
