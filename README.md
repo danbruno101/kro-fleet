@@ -75,6 +75,9 @@ scripts/e2e.sh                                    # assert all six success crite
 scripts/teardown-fleet.sh
 ```
 
+To *see* the fleet — one object across the members, its object graph, pod
+logs — build the [Headlamp plugin](headlamp-plugin/README.md).
+
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough, and
 [`docs/phase0-validation.md`](docs/phase0-validation.md) for the pinned
 versions and provider findings this is built on.
@@ -83,6 +86,7 @@ versions and provider findings this is built on.
 
 - **Demo (single-cluster portability):** https://github.com/danbruno101/kro-genaiops-demo
 - **The proposal:** [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
+- **The MVP demo plan (3 clusters + Headlamp plugin + recording):** [`docs/proposals/kro-fleet-mvp-plan.md`](docs/proposals/kro-fleet-mvp-plan.md)
 - **Fleet-scale operating model (inspiration):** https://lucy.sh/fleet-scale-kubernetes
 
 ## License

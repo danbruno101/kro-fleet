@@ -34,3 +34,6 @@ go.work.sum
 # Build output
 /bin/
 /phase0
+
+# Local fleet credentials (scripts/headlamp-kubeconfig.sh) — never commit
+*.kubeconfig
