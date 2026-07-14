@@ -75,6 +75,9 @@ scripts/e2e.sh                                    # assert all six success crite
 scripts/teardown-fleet.sh
 ```
 
+To *see* the fleet — one object across the members, its object graph, pod
+logs — build the [Headlamp plugin](headlamp-plugin/README.md).
+
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough, and
 [`docs/phase0-validation.md`](docs/phase0-validation.md) for the pinned
 versions and provider findings this is built on.

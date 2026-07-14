@@ -61,6 +61,11 @@ sure `status.clusters[]` reads well on screen. No architectural work expected.
 
 ### 3b. Headlamp plugin — `headlamp-plugin/` — **the real build**
 
+> Status: the scaffold is in-tree (`headlamp-plugin/`, pinned toolchain 0.14.0,
+> builds clean) with first versions of all four screens below; live validation
+> against the kind fleet is the next step (see
+> [`../headlamp-phase0.md`](../headlamp-phase0.md)).
+
 A TypeScript/React [Headlamp](https://headlamp.dev) plugin, living in
 `headlamp-plugin/` in this repo, that shows:
 
@@ -124,7 +129,7 @@ clusters is a stretch goal, not the MVP.
 | Risk | Status |
 |---|---|
 | multicluster-runtime + ClusterProfile hub→member reconcile actually works, versions pinned | ✅ **Validated** — [`../phase0-validation.md`](../phase0-validation.md), enforced by CI (`scripts/e2e.sh`) |
-| Headlamp cross-cluster-in-one-view: read hub **and** members in a single UI; custom **map source** API available in the current release; pod logs across clusters | ❌ **Open — validate FIRST** (step 2 above), before writing any real plugin code. If Headlamp cannot do one of these, surface it and propose alternatives (per CLAUDE.md) rather than building around it silently |
+| Headlamp cross-cluster-in-one-view: read hub **and** members in a single UI; custom **map source** API available in the current release; pod logs across clusters | 🟡 **Desk-validated** against `@kinvolk/headlamp-plugin` 0.14.0 (multi-cluster `useList({clusters})`, `registerMapSource`, per-cluster `getLogs` — see [`../headlamp-phase0.md`](../headlamp-phase0.md)); **live validation on the kind fleet still pending**. If the live pass fails one of these, surface it and propose alternatives (per CLAUDE.md) rather than building around it silently |
 
 The Headlamp Phase-0 mirrors how this repo did the controller: a throwaway spike
 under `hack/`, findings written to a `docs/` note with pinned versions, then the
