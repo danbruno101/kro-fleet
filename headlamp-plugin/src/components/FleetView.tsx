@@ -49,10 +49,22 @@ export default function FleetView() {
   const [profiles] = ClusterProfile.useList(
     hub ? { cluster: hub, namespace: FLEET_NAMESPACE } : {}
   );
-  const [pods] = K8s.ResourceClasses.Pod.useList({
+  const podsResult = K8s.ResourceClasses.Pod.useList({
     clusters: members,
     namespace: WORKLOAD_NAMESPACE,
   });
+  // Read per-cluster results, NOT the aggregated items: live validation
+  // showed the aggregate stays empty while any member hangs (e.g. a paused
+  // kind node), which would blank the whole table. Per-cluster results let
+  // reachable members render and unreachable ones surface as warnings.
+  const clusterResults = ((podsResult as any).clusterResults ?? {}) as Record<
+    string,
+    { items: any[] | null; errors: Array<Error & { cluster?: string }> | null }
+  >;
+  const pods = members.flatMap(m => clusterResults[m]?.items ?? []);
+  const memberErrors = members.flatMap(m =>
+    (clusterResults[m]?.errors ?? []).map(err => ({ cluster: m, message: err.message }))
+  );
   const [logsTarget, setLogsTarget] = React.useState<PodLogsTarget | null>(null);
 
   if (!hub) {
@@ -133,6 +145,11 @@ export default function FleetView() {
       </SectionBox>
 
       <SectionBox title={`Placed workloads — pods in ${WORKLOAD_NAMESPACE} on every member`}>
+        {memberErrors.map(err => (
+          <Typography key={err.cluster} color="error" sx={{ mb: 1 }}>
+            ⚠ {err.cluster} unreachable: {err.message}
+          </Typography>
+        ))}
         <SimpleTable
           columns={[
             { label: 'Cluster', getter: (pod: any) => pod.cluster },
