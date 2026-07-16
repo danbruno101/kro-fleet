@@ -32,10 +32,28 @@ import {
   ClusterProfile,
   FLEET_NAMESPACE,
   FleetGenAIService,
+  GenAIService,
   splitFleet,
   WORKLOAD_NAMESPACE,
 } from '../fleet';
 import { PodLogsDialog, PodLogsTarget } from './PodLogs';
+
+// Flatten a multi-cluster useList result per cluster. Live validation showed
+// the aggregated items stay empty while any member hangs (e.g. a paused kind
+// node), which would blank whole tables; per-cluster results let reachable
+// members render and clean per-member failures surface as warnings.
+function perClusterItems(result: any, members: string[]) {
+  const clusterResults = (result?.clusterResults ?? {}) as Record<
+    string,
+    { items: any[] | null; errors: Array<Error & { cluster?: string }> | null }
+  >;
+  return {
+    items: members.flatMap(m => clusterResults[m]?.items ?? []),
+    errors: members.flatMap(m =>
+      (clusterResults[m]?.errors ?? []).map(err => ({ cluster: m, message: err.message }))
+    ),
+  };
+}
 
 function ReadyLabel({ ready, text }: { ready: boolean; text?: string }) {
   return <StatusLabel status={ready ? 'success' : 'error'}>{text ?? (ready ? 'Ready' : 'NotReady')}</StatusLabel>;
@@ -49,11 +67,27 @@ export default function FleetView() {
   const [profiles] = ClusterProfile.useList(
     hub ? { cluster: hub, namespace: FLEET_NAMESPACE } : {}
   );
-  const [pods] = K8s.ResourceClasses.Pod.useList({
+  const podsResult = K8s.ResourceClasses.Pod.useList({
     clusters: members,
     namespace: WORKLOAD_NAMESPACE,
   });
+  const placedResult = GenAIService.useList({
+    clusters: members,
+    namespace: WORKLOAD_NAMESPACE,
+  });
+  const pvcResult = K8s.ResourceClasses.PersistentVolumeClaim.useList({
+    clusters: members,
+    namespace: WORKLOAD_NAMESPACE,
+  });
+  const { items: pods, errors: memberErrors } = perClusterItems(podsResult, members);
+  const { items: placed } = perClusterItems(placedResult, members);
+  const { items: pvcs } = perClusterItems(pvcResult, members);
   const [logsTarget, setLogsTarget] = React.useState<PodLogsTarget | null>(null);
+
+  const cloudOf = (cluster: string) =>
+    (profiles || []).find(p => cluster.endsWith(p.metadata.name))?.metadata.labels?.[
+      'fleet.kro.run/cloud'
+    ] ?? '—';
 
   if (!hub) {
     return (
@@ -108,6 +142,36 @@ export default function FleetView() {
         />
       </SectionBox>
 
+      <SectionBox title="One object, every cluster — placed GenAIService per member">
+        <SimpleTable
+          columns={[
+            { label: 'Cluster', getter: (gs: any) => gs.cluster },
+            { label: 'Cloud', getter: (gs: any) => cloudOf(gs.cluster ?? '') },
+            { label: 'Object', getter: (gs: any) => `${gs.metadata.namespace}/${gs.metadata.name}` },
+            {
+              label: 'State',
+              getter: (gs: any) => (
+                <ReadyLabel
+                  ready={gs.jsonData?.status?.state === 'ACTIVE'}
+                  text={gs.jsonData?.status?.state ?? 'PENDING'}
+                />
+              ),
+            },
+            {
+              label: 'StorageClass (resolved per cloud)',
+              getter: (gs: any) =>
+                (pvcs || []).find(
+                  pvc =>
+                    pvc.cluster === gs.cluster &&
+                    pvc.metadata.labels?.['kro.run/instance-id'] === gs.metadata.uid
+                )?.jsonData?.spec?.storageClassName ?? '—',
+            },
+          ]}
+          data={placed}
+          emptyMessage="Nothing placed on the members yet."
+        />
+      </SectionBox>
+
       <SectionBox title="Fleet inventory — ClusterProfiles">
         <SimpleTable
           columns={[
@@ -133,6 +197,11 @@ export default function FleetView() {
       </SectionBox>
 
       <SectionBox title={`Placed workloads — pods in ${WORKLOAD_NAMESPACE} on every member`}>
+        {memberErrors.map(err => (
+          <Typography key={err.cluster} color="error" sx={{ mb: 1 }}>
+            ⚠ {err.cluster} unreachable: {err.message}
+          </Typography>
+        ))}
         <SimpleTable
           columns={[
             { label: 'Cluster', getter: (pod: any) => pod.cluster },

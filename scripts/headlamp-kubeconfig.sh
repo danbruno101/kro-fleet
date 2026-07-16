@@ -28,7 +28,7 @@ for c in $clusters; do
   kind get kubeconfig --name "$c" > "${tmpdir}/${c}"
 done
 
-KUBECONFIG=$(printf '%s\n' "$tmpdir"/* | paste -sd:) \
+KUBECONFIG=$(printf '%s\n' "$tmpdir"/* | paste -sd: -) \
   kubectl config view --flatten > "$OUT"
 chmod 600 "$OUT"
 

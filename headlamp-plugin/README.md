@@ -34,9 +34,20 @@ npm run build
 mkdir -p dist-plugins/kro-fleet
 cp dist/main.js package.json dist-plugins/kro-fleet/
 
-# 4. Point Headlamp at the fleet + the plugin
-headlamp --kubeconfig "$PWD/../kro-fleet.kubeconfig" --plugins-dir "$PWD/dist-plugins"
+# 4. Point Headlamp at the fleet + the plugin.
+#    macOS (validated with the Headlamp 0.43.0 app): serve the app bundle's
+#    backend + frontend in browser mode — easiest to demo and record.
+/Applications/Headlamp.app/Contents/Resources/headlamp-server \
+  -kubeconfig "$PWD/../kro-fleet.kubeconfig" \
+  -html-static-dir /Applications/Headlamp.app/Contents/Resources/frontend \
+  -plugins-dir "$PWD/dist-plugins" -port 4466
+# then open http://localhost:4466
+#    (Linux/CI: the `headlamp` binary takes the same --kubeconfig/--plugins-dir.)
 ```
+
+The click-by-click demo walkthrough (with narration) is
+[`../docs/demo-script.md`](../docs/demo-script.md); live-validation findings
+and pinned versions are [`../docs/headlamp-phase0.md`](../docs/headlamp-phase0.md).
 
 For plugin development, `npm start` watches and deploys into the local
 Headlamp desktop app's plugins directory.
