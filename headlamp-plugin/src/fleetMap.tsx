@@ -19,9 +19,13 @@ limitations under the License.
 //
 //   FleetGenAIService (hub)
 //     └─ placed GenAIService (per member)          edge: "placed on <member>"
-//          └─ kro-expanded children on that member  edge: ownerReferences
+//          └─ kro-expanded children on that member  edge: kro.run/instance-id label
 //
 // Node ids are namespaced by cluster (uids are only unique per cluster).
+// Children are linked by kro's ownership labels, NOT ownerReferences: stock
+// kro 0.9.2 stamps kro.run/instance-id=<instance uid> (+ kro.run/owned=true)
+// on everything it expands and leaves ownerReferences empty (live-validated
+// against the kind fleet — see docs/headlamp-phase0.md).
 
 import { Icon } from '@iconify/react';
 import { K8s } from '@kinvolk/headlamp-plugin/lib';
@@ -94,24 +98,25 @@ export const fleetMapSource = {
       }
 
       // Placed copy -> the children stock kro expanded on that member,
-      // linked by same-cluster ownerReferences (the CAPI plugin pattern).
+      // linked by kro's instance-id label on the same cluster.
       const children = [...(deployments || []), ...(services || []), ...(pvcs || [])];
       for (const child of children) {
         const cluster = (child as any).cluster;
-        const ownerRef = (child.metadata.ownerReferences || []).find(ref =>
-          (placed || []).some(
-            p => (p as any).cluster === cluster && p.metadata.uid === ref.uid
-          )
-        );
-        if (!ownerRef) {
+        const instanceId = child.metadata.labels?.['kro.run/instance-id'];
+        const owner =
+          instanceId &&
+          (placed || []).find(
+            p => (p as any).cluster === cluster && p.metadata.uid === instanceId
+          );
+        if (!owner) {
           continue;
         }
         nodes.push({ id: nodeId(cluster, child.metadata.uid), kubeObject: child });
         edges.push({
-          id: `${nodeId(cluster, ownerRef.uid)}-${nodeId(cluster, child.metadata.uid)}`,
-          source: nodeId(cluster, ownerRef.uid),
+          id: `${nodeId(cluster, owner.metadata.uid)}-${nodeId(cluster, child.metadata.uid)}`,
+          source: nodeId(cluster, owner.metadata.uid),
           target: nodeId(cluster, child.metadata.uid),
-          label: `owned by ${ownerRef.kind}`,
+          label: 'expanded by kro',
         });
       }
 
