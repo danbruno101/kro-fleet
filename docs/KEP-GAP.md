@@ -17,7 +17,10 @@ thinking the PoC *is* the finished native design.
 | **New code surface** | A multi-cluster mode *within* kro | A **separate hub placement controller**; kro unmodified | Keeps the PoC small and reviewable. |
 | **Member credentials** | ClusterProfile `status.accessProviders` plugin mechanism (KEP-4322/5339) | **Simplified**: the provider's `Secret` kubeconfig strategy (labeled Secret next to the ClusterProfile, data key `Config`) | ClusterProfile is still the inventory API; only the credential resolution is simplified for kind. The same provider also supports the KEP-5339 `CredentialsProvider` strategy — switching is config, not architecture. |
 | **Member health** | A cluster manager agent maintains `status.conditions` (e.g. `ControlPlaneHealthy`) on each ClusterProfile | **Self-asserted**: setup scripts patch `ControlPlaneHealthy=True` manually; the provider's default readiness gate consumes it unchanged | kind members have no cluster-manager agent. The gate itself (engage only healthy profiles) is exercised for real. |
-| **Placement** | Extensible `placement.strategy` (spread, capacity, drain/evacuate) | **Label selector only** | Matches the KEP's v1 scope; strategies are reserved future work. |
+| **Placement source** | v2 adds `placement.decisionRef` — placement supplied by an external producer (scheduler / policy engine / failover controller) alongside the v1 selector | **Label selector only** | The KEP v2 delta; not yet built. This is the affordance that makes capacity/compliance/failover reachable without kro owning a scheduler. |
+| **Per-member parameters** | A decision may carry per-cluster values the graph references (`${placement.thisCluster.parameters.*}`) — what turns *replication* into *division* | **Not implemented** — every member gets an identical copy | Required for the capacity use case. Also invalidates the `status.clusters[]`-as-inventory shortcut two rows below. |
+| **Empty placement** | Terminal, explicit `Placed=False` with a machine-readable reason; never a fallback to a broader set | **Not distinguished** from "not ready yet" | Required for the compliance use case: there is no graceful fallback for a hard constraint. |
+| **Decision provenance** | Resolved decision + justification recorded in status for audit | **Not recorded** | Required by regulated users who must show where a workload ran and why it was permitted. |
 | **Distribution model** | Design allows push or pull | **Push** (hub → member API via multicluster-runtime) only | Pull-mode agent out of scope for the PoC. |
 | **Status aggregation** | Rolled-up conditions + per-member `status.clusters[]` | Implemented (may be simplified) | Track any simplifications here as they happen. |
 | **Cross-cluster GC** | Native ownership/finalizer semantics | Hub-side tracking + finalizer (`fleet.kro.run/cleanup`). Edge case: a member whose ClusterProfile is deleted **before** cleanup is skipped — its copy is orphaned on that (now unreachable) member | Same idea as OCM `ManifestWork`. A registered-but-unreachable member correctly blocks finalization and retries. |
@@ -37,10 +40,28 @@ kind, against **stock kro 0.9.2** expanding the placed objects on the members.
 - Clean lifecycle: place → converge → add/remove member → evacuate → delete, with
   no orphaned resources.
 
+## v2 scope, not yet built
+
+KEP v2 adds `decisionRef` and per-member parameters so that the layers which own
+capacity, compliance and failover can drive kro. The plan is to prove each with a
+**deliberately trivial external decision producer** — none of them part of kro,
+each replaceable by a real implementation (OCM Placement, Karmada, a policy
+engine) without changing kro. That substitutability is the property under test.
+
+| Use case | Producer to build | e2e assertion |
+|---|---|---|
+| Capacity | Reads member allocatable, emits per-member `replicas` summing to the request | Members receive *different* counts; the sum matches; capacity change reconverges |
+| Compliance | Filters to clusters with a compliance property; emits an empty decision when none qualify | Placement only on qualifying members; empty decision -> terminal `Placed=False`, **no** fallback; decision recorded in status |
+| Failover | Watches ClusterProfile `ControlPlaneHealthy`, rewrites the decision | Unplaced from the failed member, placed on a standby; teardown retried without orphaning when the member returns |
+
 ## Not attempted (explicitly out of scope for the PoC)
 - Any change to `kubernetes-sigs/kro` itself (the native mode).
 - Cross-cluster networking / service discovery (MCS territory).
-- Capacity-aware or policy-driven scheduling.
+- **Computing** placement — capacity estimation, policy evaluation, scheduling.
+  kro consumes decisions; the producers above are demo scaffolding, not a
+  scheduler, and must never move inside kro.
+- Splitting one graph across members (different parts of one unit in different
+  clusters). See "Approach 2" in the companion design doc.
 - Production concerns: HA hub, credential rotation, multi-tenancy, RBAC hardening.
 
 _Update this table in the same PR whenever the PoC adds or changes a shortcut._
