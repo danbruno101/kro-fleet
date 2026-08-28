@@ -4,13 +4,25 @@
 cluster; it is placed across many member clusters (and clouds), with per-member
 status aggregated back on the hub.**
 
-This is the reference implementation that backs the design proposal
-[`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
-— "Native Multi-Cluster Mode for KRO."
+Two documents drive this repository, and the PoC is their reference
+implementation:
+
+- **The design doc** — [`docs/design/fleet-scoped-kro.md`](docs/design/fleet-scoped-kro.md):
+  the problem framing for SIG-Multicluster. Composition vs placement, the three
+  motivating use cases (**capacity, compliance, failover**), requirements, and
+  the open questions. **Start here if you came to review the idea.**
+- **The KEP** — [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
+  ("Native Multi-Cluster Mode for KRO", **v2**): the mechanism. v2 reframes
+  placement as something KRO *consumes* — an inline selector or a referenced
+  external decision (`decisionRef`) — never something it computes.
 
 > **Status:** discussion-stage PoC. Built on kro `v1alpha1` and SIG-Multicluster
 > primitives (ClusterProfile / KEP-4322, `multicluster-runtime`). **Not for
 > production.** Runs entirely on `kind` — no cloud account, no GPU.
+> The PoC implements the KEP's **v1 scope** (label-selector placement,
+> replication); the v2 additions (`decisionRef`, per-member parameters,
+> terminal refusal on empty placement) are proposed, not built — the delta is
+> ledgered in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
 
 ## The idea
 
@@ -27,7 +39,9 @@ applied N times, with N control loops and no aggregated view.
 
 `kro-fleet` closes that gap: **one placement-enabled object on a hub cluster** →
 placed onto the matching member clusters → **status aggregated back on the hub.**
-Change it once, apply it once, it disperses.
+Change it once, apply it once, it disperses. (This is *replication* — every
+member gets the whole graph. Dividing one workload across members is the
+capacity case, and needs the KEP v2 additions; see the design doc.)
 
 ## Scope (important, and settled)
 
@@ -40,7 +54,9 @@ Change it once, apply it once, it disperses.
     (KEP-4322) for the fleet registry + member credentials.
   - **[multicluster-runtime](https://github.com/kubernetes-sigs/multicluster-runtime)**
     for reconciling across a dynamic fleet.
-- The "native mode inside kro" (expand-on-hub, one control loop) is **future work**,
+- The "native mode inside kro" (expand-on-hub, one control loop) and the KEP
+  v2 additions (`decisionRef`, per-member parameters, terminal refusal, decision
+  provenance) are **future work** — every proposed-vs-built difference is
   tracked honestly in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
 
 ## Architecture (thin PoC)
@@ -49,7 +65,8 @@ Change it once, apply it once, it disperses.
                          HUB CLUSTER
    ┌───────────────────────────────────────────────────────────┐
    │  fleet placement controller (multicluster-runtime)         │
-   │   • watches a FleetGenAIService (placement selector)       │
+   │   • watches a FleetGenAIService (placement: v1 selector;   │
+   │     v2 decisionRef is proposed, not built — see KEP-GAP)   │
    │   • reads the ClusterProfile inventory                     │
    │   • places the GenAIService onto matching members          │
    │   • tracks applied manifests, GC on unplace/delete         │
@@ -85,7 +102,9 @@ versions and provider findings this is built on.
 ## Related
 
 - **Demo (single-cluster portability):** https://github.com/danbruno101/kro-genaiops-demo
-- **The proposal:** [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
+- **The design doc (start here):** [`docs/design/fleet-scoped-kro.md`](docs/design/fleet-scoped-kro.md)
+- **The KEP (v2):** [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
+- **The honest ledger (proposed vs built):** [`docs/KEP-GAP.md`](docs/KEP-GAP.md)
 - **The MVP demo plan (3 clusters + Headlamp plugin + recording):** [`docs/proposals/kro-fleet-mvp-plan.md`](docs/proposals/kro-fleet-mvp-plan.md)
 - **Fleet-scale operating model (inspiration):** https://lucy.sh/fleet-scale-kubernetes
 

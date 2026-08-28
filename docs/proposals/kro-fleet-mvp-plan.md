@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Status** | Approved build plan |
+| **Status** | Executed — 3a/3b built and live-validated (2026-07-15); kept as the record of the plan |
 | **Audience** | SIG Cloud Provider, KRO maintainers, and whoever builds this |
 | **Backs** | [`KEP-kro-multicluster.md`](KEP-kro-multicluster.md) (the proposal) · [`../KEP-GAP.md`](../KEP-GAP.md) (the honest ledger) |
-| **Supersedes** | The earlier separate `kro-fleet-poc-prompt.md` and `kro-fleet-headlamp-prompt.md` drafts — this is the single MVP spec |
+| **Supersedes** | Two earlier working drafts (kept outside this repo) — this is the single MVP spec |
 
 This document is the **single, comprehensive MVP spec** for turning the kro-fleet
 PoC into a visual, recordable demo. It exists because SIG Cloud Provider (elmiko)
@@ -61,10 +61,10 @@ sure `status.clusters[]` reads well on screen. No architectural work expected.
 
 ### 3b. Headlamp plugin — `headlamp-plugin/` — **the real build**
 
-> Status: the scaffold is in-tree (`headlamp-plugin/`, pinned toolchain 0.14.0,
-> builds clean) with first versions of all four screens below; live validation
-> against the kind fleet is the next step (see
-> [`../headlamp-phase0.md`](../headlamp-phase0.md)).
+> Status: built and **live-validated against the kind fleet (2026-07-15)** —
+> all four screens pass (see [`../headlamp-phase0.md`](../headlamp-phase0.md));
+> screenshots in [`../img/`](../img/), recordable walkthrough in
+> [`../demo-script.md`](../demo-script.md).
 
 A TypeScript/React [Headlamp](https://headlamp.dev) plugin, living in
 `headlamp-plugin/` in this repo, that shows:
@@ -97,7 +97,8 @@ rendering a kro object graph — reuse its ideas for the graph layout.
 row there if the MVP introduces any *new* shortcut):
 
 - Native expand-on-hub (the KEP itself).
-- Placement strategies beyond the label selector.
+- Placement supplied by an external decision producer (`placement.decisionRef`,
+  per-member parameters) — the KEP v2 delta; see the KEP and `../KEP-GAP.md`.
 - Pull mode; GC edge cases beyond what e2e already covers; scale.
 - Hardened credentials/RBAC, HA hub, multi-tenancy.
 - Any new ML/workload content — reuse the sister repo's RGDs and
@@ -121,15 +122,16 @@ clusters is a stretch goal, not the MVP.
 3. **Plugin build:** fleet view → object-across-clusters view → graph → logs, in
    that order (each screen is independently demoable).
 4. **Record it.** Script the narration to the audience narrative (§2); capture the
-   full loop: author on hub → three clusters converge → graph → logs. Update the
-   Marp deck (`docs/deck.md`) to embed/point at the recording.
+   full loop: author on hub → three clusters converge → graph → logs. The
+   click-by-click script exists ([`../demo-script.md`](../demo-script.md));
+   the recording itself (and linking it from `docs/deck.md`) is still open.
 
 ## 6. Phase-0 risks — validate before building on them
 
 | Risk | Status |
 |---|---|
 | multicluster-runtime + ClusterProfile hub→member reconcile actually works, versions pinned | ✅ **Validated** — [`../phase0-validation.md`](../phase0-validation.md), enforced by CI (`scripts/e2e.sh`) |
-| Headlamp cross-cluster-in-one-view: read hub **and** members in a single UI; custom **map source** API available in the current release; pod logs across clusters | 🟡 **Desk-validated** against `@kinvolk/headlamp-plugin` 0.14.0 (multi-cluster `useList({clusters})`, `registerMapSource`, per-cluster `getLogs` — see [`../headlamp-phase0.md`](../headlamp-phase0.md)); **live validation on the kind fleet still pending**. If the live pass fails one of these, surface it and propose alternatives (per CLAUDE.md) rather than building around it silently |
+| Headlamp cross-cluster-in-one-view: read hub **and** members in a single UI; custom **map source** API available in the current release; pod logs across clusters | ✅ **Live-validated** on the kind fleet, 2026-07-15 — all four checks pass, including the key unknown (the map canvas is not single-cluster-scoped). See [`../headlamp-phase0.md`](../headlamp-phase0.md) |
 
 The Headlamp Phase-0 mirrors how this repo did the controller: a throwaway spike
 under `hack/`, findings written to a `docs/` note with pinned versions, then the

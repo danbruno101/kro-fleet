@@ -163,7 +163,9 @@ What should be observably true if this works.
     status**, so a regulated user can prove after the fact where a workload ran
     and why it was allowed.
   - A compliance violation is **impossible by construction** rather than
-    prevented by convention: the instance stays Pending with a clear reason.
+    prevented by convention: when no cluster qualifies, the instance reports a
+    terminal, explicit refusal with the reason recorded — never "not ready
+    yet", never a fallback to a broader set.
   - SIG-MC primitives are **consumed, not duplicated** — no kro-specific cluster
     inventory, no kro-specific cluster property vocabulary.
 
@@ -192,6 +194,11 @@ The honest summary of the table: **no single row is sufficient.** The transports
 solve reachability and say nothing about policy or lifecycle; the semantics rows
 assume a transport exists. That split is itself an argument for the design
 questions below being the right place to start.
+
+(One transport is deliberately absent from the table because it is neither a
+proposal nor adjacent work — it is what the PoC *already uses*:
+**multicluster-runtime** with a ClusterProfile provider. It is compared against
+Approaches 4 and 5 under the transport design question below.)
 
 ## Approach 1: whole-instance placement
 
@@ -287,7 +294,7 @@ metadata:
   # ownerReferences -> the GenAIService instance
 spec:
   workload:
-    manifests: [ ... the expanded, ordered resources for one placement group ... ]
+    manifests: [ ... the expanded, ordered resources destined for one member ... ]
 ```
 
 Best ecosystem fit and least new machinery; kro stays a graph engine and R6 comes
@@ -411,10 +418,12 @@ restrictive to be useful?
 ### What does "Ready" mean for a spanning instance? — *we have an answer, does it hold?*
 
 Three of five clusters converged — is the instance Ready? **Our proposed answer,
-already implemented:** per-cluster entries in `status.clusters[]` plus an explicit
-tolerance (`minReadyClusters`) folding into the rolled-up `Ready` condition;
-members unreachable beyond a grace period surface `Degraded`/`Unknown` rather
-than blocking the object.
+implemented in the PoC:** per-cluster entries in `status.clusters[]` plus an
+explicit tolerance (`minReadyClusters`) folding into the rolled-up `Ready`
+condition. (The KEP additionally specifies that members unreachable beyond a
+grace period surface `Degraded`/`Unknown` rather than blocking the object; the
+PoC currently just marks them not-ready with a reason and retries — one of the
+gaps ledgered in `docs/KEP-GAP.md`.)
 
 Open part: whether tolerance should generalise to a policy enum
 (`All`/`Any`/`Quorum`/percentage), and whether this matches how this group thinks
@@ -476,7 +485,7 @@ per-resource placement.
     sharing one ReadWriteOnce PVC work on single-node kind and deadlock with a
     Multi-Attach error the moment replicas land on different nodes of a real
     cluster. The fleet version of that mistake is worse and quieter.
-  - Consequence for lifecycle/drain: stateless groups can genuinely be evacuated;
+  - Consequence for failover/drain: stateless groups can genuinely be evacuated;
     stateful ones need a data plane and a human decision. An RGD probably has to
     declare which is which.
 
@@ -539,7 +548,7 @@ composition layer exists to provide.
     relevant to the capacity case.
   - **Karmada** — divided replica scheduling with a dedicated scheduler-estimator,
     cluster taints, and `GracefulEvictionTask` for drain. Closest existing thing
-    to the capacity and lifecycle cases.
+    to the capacity and failover cases.
   - **OCM** — `ManagedCluster` taints with Placement tolerations (including
     toleration seconds), and `PlacementDecision` as a decision output.
   - **Crossplane / Config Connector / ACK** — the per-resource-CRD model: correct
@@ -560,7 +569,7 @@ composition layer exists to provide.
     `docs/KEP-GAP.md` is the honest ledger of what the PoC does and does not
     prove.
 
-# Key takeaways from the sig-mc meeting on \<date\>
+# Key takeaways from the SIG-Multicluster discussion
 
 *(to fill in during/after the meeting)*
 
