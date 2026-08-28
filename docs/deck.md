@@ -13,7 +13,7 @@ description: "One object on a hub, placed across clouds, status folded back. Bui
 **Author one object on a hub. It lands on every matching cluster, across
 clouds. Status folds back onto the object you wrote.**
 
-A thin PoC backing *KEP: Native Multi-Cluster Mode for KRO*
+A thin PoC backing *KEP: Native Multi-Cluster Mode for KRO* (v2)
 `github.com/danbruno101/kro-fleet`
 
 ---
@@ -103,6 +103,10 @@ spec:
 
 The template stays **cloud- and cluster-agnostic**. Placement is a field.
 
+<small>Selector shown = the PoC (KEP v1 scope). KEP **v2** adds a second
+source: `placement.decisionRef` — a decision computed by a scheduler, policy
+engine, or failover controller that KRO consumes. Proposed, not built.</small>
+
 ---
 
 ## The status surface
@@ -146,8 +150,12 @@ Plus the portability beat: the *same* hub object binds
 | cluster manager maintains health | health **asserted at registration** |
 | dedicated applied-manifest inventory | `status.clusters[]` doubles as inventory |
 | fleet scale | 3 kind clusters on a laptop |
+| v2: `decisionRef` (external decision producers) | selector only |
+| v2: per-member parameters (division) | replication only |
+| v2: terminal refusal on empty placement + provenance | not distinguished / not recorded |
 
-Every row is deliberate; every row is documented in `docs/KEP-GAP.md`.
+Selected rows — the full ledger is `docs/KEP-GAP.md`, and every divergence is
+documented there.
 
 ---
 
@@ -158,9 +166,11 @@ Every row is deliberate; every row is documented in `docs/KEP-GAP.md`.
 - The **fabric holds**: ClusterProfile + multicluster-runtime carried the
   whole PoC — inventory, credentials, engagement lifecycle — with an
   official provider, out of the box.
-- The remaining distance to "native" is **inside kro** (hub-side expansion,
-  per-resource `placement: hub|members`) — precisely the part worth
-  designing with the SIG rather than prototyping around.
+- The remaining distance splits in two: **inside kro** (hub-side expansion,
+  per-resource `placement: hub|members`) and **with SIG-Multicluster** — a
+  portable placement-decision API that `decisionRef` can consume. The second
+  is the ask: it is what lets capacity, compliance and failover be served
+  without kro becoming a scheduler (see `docs/design/fleet-scoped-kro.md`).
 
 ---
 

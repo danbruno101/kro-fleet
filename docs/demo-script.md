@@ -7,7 +7,7 @@ narrative** of [`proposals/kro-fleet-mvp-plan.md`](proposals/kro-fleet-mvp-plan.
 [`KEP-GAP.md`](KEP-GAP.md), not in the recording.
 
 Everything below was exercised end-to-end on 2026-07-15 (Headlamp app 0.43.0,
-plugin toolchain 0.14.0, kro 0.9.2, kind v1.36.1) — following this script
+plugin toolchain 0.14.0, kro 0.9.2, kind v0.32.0 / node image v1.36.1) — following this script
 requires no improvisation. Reference frames for every screen are in
 [`img/`](img/).
 
@@ -93,7 +93,8 @@ kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.
 > "One object. A GenAIService — a model server for Qwen 0.5B — wrapped with
 > one thing only: a placement rule, *every cluster labeled tier prod*. Notice
 > what it does NOT say: no cluster names, no clouds, no storage classes, no
-> per-environment overlays. The developer authors this once, on the hub."
+> per-environment overlays. The developer's spec is inside, verbatim; the
+> placement wrapper is the *platform team's*, authored once, on the hub."
 
 **Switch to the browser** (KRO Fleet view, it updates live):
 

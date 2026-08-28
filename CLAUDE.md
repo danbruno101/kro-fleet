@@ -1,7 +1,10 @@
 # CLAUDE.md — kro-fleet
 
 Durable project context for Claude Code working in this repo. Read this and
-`docs/proposals/KEP-kro-multicluster.md` before doing anything.
+the three source-of-truth documents before doing anything:
+`docs/design/fleet-scoped-kro.md` (problem framing),
+`docs/proposals/KEP-kro-multicluster.md` (the KEP, v2), and
+`docs/KEP-GAP.md` (proposed-vs-built ledger).
 
 ## What this repo is
 
@@ -113,9 +116,12 @@ Rules that follow:
 - When the KEP's placement or API language changes, `grep -rn KEP api/
   internal/ cmd/` — code comments (`api/v1alpha1/types.go`, the controller)
   restate KEP claims and must be updated, or the mismatch recorded in KEP-GAP.
-- Presentation docs (`docs/deck.md`, `docs/RUNBOOK.md`, `docs/demo-script.md`,
-  phase0 docs) are NOT part of the contract: sweep them once at the end of an
-  editing pass, not per edit.
+- Presentation and repo-facing docs (`README.md`, `docs/deck.md`,
+  `docs/RUNBOOK.md`, `docs/demo-script.md`, phase0 docs,
+  `docs/proposals/kro-fleet-mvp-plan.md`, `headlamp-plugin/README.md`) are NOT
+  part of the contract: sweep them once at the end of an editing pass, not per
+  edit. The sweep is real — most drift found in review lived in exactly these
+  files.
 
 ### Commit attribution — NON-NEGOTIABLE
 - Claude is only ever **"Assisted-by"**, never a co-author. Use the trailer
@@ -149,6 +155,8 @@ internal/      # controller, placement, applied-manifest tracking, status agg
 scripts/       # setup-fleet.sh, teardown-fleet.sh
 examples/      # FleetGenAIService samples
 config/        # CRDs, RBAC, kind configs
-docs/          # RUNBOOK.md, KEP-GAP.md, deck, proposals/KEP-kro-multicluster.md
+docs/          # RUNBOOK.md, KEP-GAP.md, deck, design/fleet-scoped-kro.md,
+               # proposals/KEP-kro-multicluster.md
+headlamp-plugin/     # the fleet dashboard (Headlamp plugin)
 .github/workflows/   # hermetic kind CI
 ```

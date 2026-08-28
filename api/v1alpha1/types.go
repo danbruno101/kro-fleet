@@ -55,7 +55,11 @@ type GenAIServiceTemplate struct {
 	Spec runtime.RawExtension `json:"spec"`
 }
 
-// Placement is v1 of the KEP's placement concept: label-selector only.
+// Placement carries the KEP's placement concept. The KEP (v2) defines two
+// sources — an inline clusterSelector or a referenced external decision
+// (placement.decisionRef) — of which this PoC implements the selector only;
+// decisionRef and per-member parameters are proposed, not built (see
+// docs/KEP-GAP.md).
 type Placement struct {
 	// ClusterSelector selects ClusterProfile objects by label. An empty
 	// selector matches no clusters (explicit opt-in, no accidental

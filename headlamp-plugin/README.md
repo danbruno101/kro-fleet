@@ -12,8 +12,8 @@ the member clusters**, in one Headlamp instance.
 
 Built with `@kinvolk/headlamp-plugin` **0.14.0** (pinned). API patterns follow
 the official Cluster API plugin (`registerMapSource`) and Kubeflow plugin
-(per-cluster `useGet` + `getLogs`) shipped with that package. Desk-validated
-findings and the remaining live-validation checklist: see
+(per-cluster `useGet` + `getLogs`) shipped with that package. All findings are
+**live-validated** (kind fleet, 2026-07-15): see
 [`../docs/headlamp-phase0.md`](../docs/headlamp-phase0.md).
 
 ## Run it against the kind fleet
