@@ -94,6 +94,26 @@ ASK the user first when:
 - Update `docs/KEP-GAP.md` as the honest ledger whenever the PoC simplifies vs the KEP.
 - Prefer small, reviewable PRs over one giant drop.
 
+### Commit attribution — NON-NEGOTIABLE
+- Claude is only ever **"Assisted-by"**, never a co-author. Use the trailer
+  `Assisted-by: Claude <noreply@anthropic.com>`. NEVER use `Co-Authored-By:` for
+  Claude — GitHub treats that as real co-authorship and adds Claude to the
+  repo's contributors list, which violates the contribution guidelines Daniel
+  works under. Claude must also never be the commit *author* or *committer*.
+- **Verify the identity before the first commit and push of a session.** This
+  repo is owned by `danbruno101`; commits must be authored as
+  `Daniel Bruno <daniel.c.bruno@gmail.com>` and pushed as `danbruno101`. The
+  machine's *global* git identity is the work account
+  (`danielbruno@boroughtech.com` → `dbruno-bt`) and `gh` may have `dbruno-bt`
+  active — both are wrong here. Check and fix BEFORE committing:
+  ```bash
+  git config user.email          # must be daniel.c.bruno@gmail.com (set locally if not)
+  gh auth status                 # active account must be danbruno101
+  gh auth switch --user danbruno101   # if it is not
+  ```
+  This has gone wrong before: dbruno-bt and Claude both appeared in this repo's
+  contributors list and the entire history had to be rewritten to remove them.
+
 ### Definition of done for a change
 `go build` + `go vet` clean; unit tests pass; the kind e2e (or the relevant subset)
 passes locally/CI; docs updated; KEP-GAP kept honest.
