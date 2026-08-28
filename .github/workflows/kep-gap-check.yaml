@@ -1,0 +1,42 @@
+# Enforces the document consistency contract in CLAUDE.md: a PR that changes
+# the KEP's promises must update the honest ledger (docs/KEP-GAP.md) in the
+# same PR — or explicitly opt out by putting the literal phrase
+# `KEP-GAP: no change needed` in the PR body with a one-line reason.
+#
+# Scope: pull requests only (there is nothing to check on push; main is
+# PR-gated by the protect-main ruleset). This job is deliberately dumb: it
+# compares changed paths, nothing more. Keeping the ledger *accurate* is still
+# a human/reviewer job — this only prevents forgetting it exists.
+name: kep-gap-check
+
+on:
+  pull_request:
+    paths:
+      - "docs/proposals/KEP-kro-multicluster.md"
+
+jobs:
+  ledger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check KEP-GAP.md was updated (or explicitly waived)
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "${PR_BODY}" | grep -qF 'KEP-GAP: no change needed'; then
+            echo 'Waived: PR body contains "KEP-GAP: no change needed".'
+            exit 0
+          fi
+          CHANGED=$(gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename')
+          echo "Changed files:"; echo "${CHANGED}"
+          if echo "${CHANGED}" | grep -qx 'docs/KEP-GAP.md'; then
+            echo 'OK: KEP changed and KEP-GAP.md updated in the same PR.'
+            exit 0
+          fi
+          echo '::error::This PR changes docs/proposals/KEP-kro-multicluster.md without updating docs/KEP-GAP.md.'
+          echo '::error::Either update the ledger in this PR, or add the line "KEP-GAP: no change needed — <reason>" to the PR description and re-run this check.'
+          echo '(See "Document consistency contract" in CLAUDE.md.)'
+          exit 1

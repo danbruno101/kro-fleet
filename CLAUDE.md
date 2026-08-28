@@ -94,6 +94,29 @@ ASK the user first when:
 - Update `docs/KEP-GAP.md` as the honest ledger whenever the PoC simplifies vs the KEP.
 - Prefer small, reviewable PRs over one giant drop.
 
+### Document consistency contract
+Three documents divide the truth; do not let claims migrate between them:
+- **`docs/proposals/KEP-kro-multicluster.md`** owns *promises*: goals, API
+  shape, design details. What we intend to be true.
+- **`docs/design/fleet-scoped-kro.md`** owns the *problem and open questions*
+  for SIG-Multicluster. It cross-references the KEP; it must not restate or
+  fork the KEP's API.
+- **`docs/KEP-GAP.md`** owns the *proposed-vs-built delta*. It is the ONLY
+  place allowed to describe what actually runs. If the KEP and the code
+  disagree, KEP-GAP says so — never silently reconcile either side.
+
+Rules that follow:
+- Any PR touching the KEP's Goals / API sketch / Design details **must update
+  `docs/KEP-GAP.md` in the same PR**, or include the literal phrase
+  `KEP-GAP: no change needed` in the PR body with a one-line reason. CI
+  enforces this (`.github/workflows/kep-gap-check.yaml`).
+- When the KEP's placement or API language changes, `grep -rn KEP api/
+  internal/ cmd/` — code comments (`api/v1alpha1/types.go`, the controller)
+  restate KEP claims and must be updated, or the mismatch recorded in KEP-GAP.
+- Presentation docs (`docs/deck.md`, `docs/RUNBOOK.md`, `docs/demo-script.md`,
+  phase0 docs) are NOT part of the contract: sweep them once at the end of an
+  editing pass, not per edit.
+
 ### Commit attribution — NON-NEGOTIABLE
 - Claude is only ever **"Assisted-by"**, never a co-author. Use the trailer
   `Assisted-by: Claude <noreply@anthropic.com>`. NEVER use `Co-Authored-By:` for
