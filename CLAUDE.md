@@ -131,14 +131,13 @@ Rules that follow:
   works under. Claude must also never be the commit *author* or *committer*.
 - **Verify the identity before the first commit and push of a session.** This
   repo is owned by `danbruno101`; commits must be authored as
-  `Daniel Bruno <daniel.c.bruno@gmail.com>` and pushed as `danbruno101`. The
-  machine's *global* git identity is the work account
-  (`danielbruno@boroughtech.com` → `dbruno-bt`) and `gh` may have `dbruno-bt`
-  active — both are wrong here. Check and fix BEFORE committing:
+  `Daniel Bruno <daniel.c.bruno@gmail.com>` and pushed as `danbruno101`. Since
+  the 2026-08-31 account consolidation the machine's global git identity is the
+  personal address and the old work account (`dbruno-bt`) is retired — but the
+  check stays cheap and the failure stays expensive, so run it anyway:
   ```bash
-  git config user.email          # must be daniel.c.bruno@gmail.com (set locally if not)
+  git config user.email          # must be daniel.c.bruno@gmail.com
   gh auth status                 # active account must be danbruno101
-  gh auth switch --user danbruno101   # if it is not
   ```
   This has gone wrong before: dbruno-bt and Claude both appeared in this repo's
   contributors list and the entire history had to be rewritten to remove them.
