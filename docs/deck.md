@@ -120,7 +120,7 @@ spec:
     spec: { name: demo-llm, mode: gpu, replicas: 8 }   # the developer's spec, unchanged
 ```
 
-- no single cluster has 8 free GPUs → the decision says **4 + 2 + 2**
+- no single cluster has 8 free GPUs → the decision says **3 + 3 + 2**
 - each cloud expands its slice with stock kro; storage class, load balancer,
   identity resolved per cloud by the platform; **one Ready** = 8/8 replicas
 - `Placed=False` is explicit: `DecisionPending`, `NoEligibleClusters`,

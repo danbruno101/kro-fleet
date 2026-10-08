@@ -21,7 +21,7 @@ SIG, rather than silently extending their API.
 
 ## Gap 1 — per-member parameters
 
-The capacity case divides one unit across clusters: 8 replicas as 4 + 2 + 2.
+The capacity case divides one unit across clusters: 8 replicas as 3 + 3 + 2.
 `PlacementDecision` answers "which clusters", not "how much each". Without
 per-member values the only possible semantics is replication (every member
 runs the whole template), which is exactly what the capacity case cannot

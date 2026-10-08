@@ -45,7 +45,7 @@ back on the hub.** Change it once, apply it once, it disperses. Placement is
 either an inline selector (*replication*: every member gets the whole graph)
 or a standard `PlacementDecision` written by something else (*division*: a
 model server asking for 8 replicas that no single cluster can hold lands as
-4 + 2 + 2 across clouds, with one rolled-up Ready). kro-fleet consumes the
+3 + 3 + 2 across clouds, with one rolled-up Ready). kro-fleet consumes the
 decision; it never computes one.
 
 ## Scope (important, and settled)
