@@ -1,0 +1,21 @@
+# GKE platform config (platform-team owned) for the fleet demo — a single
+# KRO-owned object; the GenAIService fleet RGD reads what it emits.
+# __PLACEHOLDERS__ are filled by scripts/demo.sh for --simulated / --real-gpu.
+apiVersion: kro.run/v1alpha1
+kind: ClusterPlatform
+metadata:
+  name: platform
+  namespace: fleet-demo
+spec:
+  cloud: gke
+  region: us-central1
+  # GKE ships premium-rwo: KRO references it, never creates it.
+  storageClass: premium-rwo
+  manageStorageClass: false
+  acceleratorResource: __ACCELERATOR__
+  servingImage: __SERVING_IMAGE__
+  servingCPU: "__SERVING_CPU__"
+  servingMemory: __SERVING_MEMORY__
+  # Workload Identity: set IDENTITY to <sa>@<project>.iam.gserviceaccount.com.
+  identityAnnotation: iam.gke.io/gcp-service-account
+  identity: "__IDENTITY__"

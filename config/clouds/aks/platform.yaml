@@ -1,0 +1,21 @@
+# AKS platform config (platform-team owned) for the fleet demo — a single
+# KRO-owned object; the GenAIService fleet RGD reads what it emits.
+# __PLACEHOLDERS__ are filled by scripts/demo.sh for --simulated / --real-gpu.
+apiVersion: kro.run/v1alpha1
+kind: ClusterPlatform
+metadata:
+  name: platform
+  namespace: fleet-demo
+spec:
+  cloud: aks
+  region: eastus
+  # AKS ships managed-csi: KRO references it, never creates it.
+  storageClass: managed-csi
+  manageStorageClass: false
+  acceleratorResource: __ACCELERATOR__
+  servingImage: __SERVING_IMAGE__
+  servingCPU: "__SERVING_CPU__"
+  servingMemory: __SERVING_MEMORY__
+  # Microsoft Entra Workload ID: set IDENTITY to the managed identity's client ID.
+  identityAnnotation: azure.workload.identity/client-id
+  identity: "__IDENTITY__"

@@ -32,6 +32,12 @@ jobs:
           go tool controller-gen crd paths=./api/... output:crd:dir=config/crd
           git diff --exit-code -- api config/crd || { echo "generated code drifted: run controller-gen and commit"; exit 1; }
           go test ./...
+      - name: Cloud demo scripts, dry-run (no cloud CLI, nothing created)
+        run: |
+          for s in provision demo reset teardown; do
+            scripts/$s.sh --dry-run --yes --no-pause > "/tmp/$s.log" 2>&1 || { cat "/tmp/$s.log"; exit 1; }
+          done
+          grep -q 'eksctl create cluster' /tmp/provision.log && grep -q 'delete fgs' /tmp/demo.log && echo "dry-runs ok"
 
   e2e:
     runs-on: ubuntu-latest

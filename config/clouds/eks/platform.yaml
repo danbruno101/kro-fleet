@@ -1,0 +1,28 @@
+# EKS platform config (platform-team owned) for the fleet demo — a single
+# KRO-owned object; the GenAIService fleet RGD reads what it emits.
+# __PLACEHOLDERS__ are filled by scripts/demo.sh for --simulated / --real-gpu;
+# the developer's instance is identical in both.
+apiVersion: kro.run/v1alpha1
+kind: ClusterPlatform
+metadata:
+  name: platform
+  namespace: fleet-demo
+spec:
+  cloud: eks
+  region: us-east-1
+  # EKS ships no StorageClass; Auto Mode ships the EBS CSI driver. KRO creates
+  # the class (gp3, encrypted) — the "100% KRO" point from the sister demo.
+  storageClass: gp3
+  manageStorageClass: true
+  provisioner: ebs.csi.eks.amazonaws.com
+  volumeType: gp3
+  encrypted: true
+  makeDefault: true
+  acceleratorResource: __ACCELERATOR__
+  servingImage: __SERVING_IMAGE__
+  servingCPU: "__SERVING_CPU__"
+  servingMemory: __SERVING_MEMORY__
+  # EKS Pod Identity / IRSA: set IDENTITY to the role ARN to bind the serving
+  # ServiceAccount; empty = no binding.
+  identityAnnotation: eks.amazonaws.com/role-arn
+  identity: "__IDENTITY__"

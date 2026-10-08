@@ -1,0 +1,24 @@
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: cloud.example.com}
+spec: {value: gke}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: region.example.com}
+spec: {value: us-central1}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: accelerator.example.com}
+spec: {value: gpu}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: cost-tier.example.com}
+spec: {value: "2"}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: capacity-type.example.com}
+spec: {value: on-demand}
