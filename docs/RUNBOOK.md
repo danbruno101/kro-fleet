@@ -10,7 +10,7 @@ ledgered in [`KEP-GAP.md`](KEP-GAP.md).
 
 ## Prerequisites
 
-- docker, kind ≥ 0.32, kubectl ≥ 1.36, helm ≥ 3.14 (v4 works), Go ≥ 1.26
+- docker, kind ≥ 0.33, kubectl ≥ 1.37, helm ≥ 3.14 (v4 works), Go ≥ 1.26
 - ~6 GB RAM headroom for 3 single-node kind clusters
 - Nothing else: no cloud account, no GPU, no secrets.
 
@@ -24,9 +24,9 @@ What this does (all versions pinned inside the script):
 
 | Where | What |
 |---|---|
-| hub | `ClusterProfile` CRD (cluster-inventory-api v0.1.3, KEP-4322) + our `FleetGenAIService` CRD |
-| members | stock **kro 0.9.2** (Helm, `registry.k8s.io`), the sister repo's `GenAIService` + `ClusterPlatform` RGDs (pinned commit), one `ClusterPlatform` per simulated cloud (member-1 = gke/`premium-rwo`, member-2 = aks/`managed-csi`) |
-| hub | one `ClusterProfile` per member (labels `tier=prod`, `fleet.kro.run/cloud=…`) + a labeled kubeconfig `Secret` (the provider's Secret strategy) |
+| hub | `ClusterProfile` + `PlacementDecision` CRDs (cluster-inventory-api v0.1.3, KEP-4322 / KEP-5313) + the `fleet.kro.run` CRDs |
+| members | stock **kro 0.9.4** (Helm, `registry.k8s.io`), the About API `ClusterProperty` CRD, the sister repo's `GenAIService` + `ClusterPlatform` RGDs (pinned commit), one `ClusterPlatform` per simulated cloud (member-1 = gke/`premium-rwo`, member-2 = aks/`managed-csi`) |
+| hub | one `ClusterProfile` per member (labels `tier=prod`, `fleet.kro.run/cloud=…`) whose `status.accessProviders[]` points the `kubeconfig-secretreader` exec plugin at that member's kubeconfig `Secret` (KEP-4322 / KEP-5339); the plugin binary is built into `bin/` |
 
 Members run **zero fleet-aware code**.
 
@@ -36,11 +36,16 @@ Members run **zero fleet-aware code**.
 ## 2. Start the placement controller (hub-side, the only new code)
 
 ```bash
-go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub
+go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub \
+  --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin
 ```
 
 Watch the log: the cluster-inventory-api provider engages each healthy
-ClusterProfile (`Cluster engaged manager…`).
+ClusterProfile (`Cluster engaged manager…`), fetching each member's credentials
+through the exec plugin named in its `status.accessProviders`. Cloud fleets
+pass `--access-providers-file` (the `pkg/access` JSON format) instead, mapping
+their provider names to `aws eks get-token`, `gke-gcloud-auth-plugin` or
+`kubelogin`.
 
 ## 3. Place one object across the fleet
 
@@ -98,7 +103,7 @@ scripts/teardown-fleet.sh
 
 | Symptom | Cause / fix |
 |---|---|
-| ClusterProfile never engages | Its status needs `ControlPlaneHealthy=True` (setup asserts it; see KEP-GAP) and a Secret labeled `x-k8s.io/cluster-inventory-consumer=kro-fleet`, `x-k8s.io/cluster-profile=<name>` with key `Config`. |
+| ClusterProfile never engages | Its status needs `ControlPlaneHealthy=True` (setup asserts it; see KEP-GAP) and an `accessProviders[]` entry named `kubeconfig-secretreader` whose `client.authentication.k8s.io/exec` extension names the kubeconfig Secret (`name`, `key: Config`, `namespace`). The plugin must be reachable: `--kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin`. |
 | Member pods stuck `ErrImagePull` behind a proxy | Node containers can't see a localhost proxy. `PRELOAD_IMAGES=true scripts/setup-fleet.sh`. |
 | `kind load docker-image` fails with `content digest … not found` | Docker's containerd image store + multi-arch images. The scripts already work around it (`docker save \| ctr import`). |
 | kubelet refuses to start on cgroup v1 hosts | Handled by `failCgroupV1: false` in `config/kind/cluster.yaml` (no-op on cgroup v2). |

@@ -27,6 +27,12 @@ M1="${PREFIX}-member-1"; M1_CTX="kind-${M1}"
 M2="${PREFIX}-member-2"; M2_CTX="kind-${M2}"
 CTRL_LOG="$(mktemp -t fleet-controller-XXXX.log)"
 CTRL_PID=""
+CONSUMER="${CONSUMER:-kro-fleet}"
+TIER="${TIER:-prod}"
+PLUGIN_BIN="${PLUGIN_BIN:-${REPO_ROOT}/bin/kubeconfig-secretreader-plugin}"
+
+# shellcheck source=lib/fleet.sh
+. "${REPO_ROOT}/scripts/lib/fleet.sh"
 
 hub()    { kubectl --context "$HUB_CTX" "$@"; }
 member() { local m=$1; shift; kubectl --context "kind-${m}" "$@"; }
@@ -83,7 +89,8 @@ echo "### e2e: setting up the fleet (1 hub + 2 members)"
 echo "### e2e: starting the fleet controller (host process)"
 CTRL_BIN="$(mktemp -t fleet-controller-XXXX)"
 ( cd "$REPO_ROOT" && go build -o "$CTRL_BIN" ./cmd/fleet-controller )
-"$CTRL_BIN" --hub-context "$HUB_CTX" --fleet-namespace "$FLEET_NS" >"$CTRL_LOG" 2>&1 &
+"$CTRL_BIN" --hub-context "$HUB_CTX" --fleet-namespace "$FLEET_NS" \
+  --kubeconfig-secretreader-plugin "$PLUGIN_BIN" >"$CTRL_LOG" 2>&1 &
 CTRL_PID=$!
 
 echo "### criterion 3 (part 1): member-2 is NOT registered when the workload is placed"
@@ -99,22 +106,10 @@ echo "### criterion 6: status.clusters[] + rollup are correct (1 member)"
 [ "$(hub get fgs demo-llm -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = "True" ] || fail "rolled-up Ready condition is not True (tolerance minReadyClusters=1)"
 
 echo "### criterion 3 (part 2): registering member-2's ClusterProfile lands the workload automatically"
-cat <<EOF | hub apply -f - >/dev/null
-apiVersion: multicluster.x-k8s.io/v1alpha1
-kind: ClusterProfile
-metadata:
-  name: ${M2}
-  namespace: ${FLEET_NS}
-  labels:
-    tier: prod
-    fleet.kro.run/cloud: aks
-spec:
-  displayName: ${M2}
-  clusterManager:
-    name: kro-fleet
-EOF
-hub patch clusterprofile "$M2" -n "$FLEET_NS" --subresource=status --type=merge \
-  -p "{\"status\":{\"conditions\":[{\"type\":\"ControlPlaneHealthy\",\"status\":\"True\",\"reason\":\"AssertedAtRegistration\",\"message\":\"e2e\",\"lastTransitionTime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}}" >/dev/null
+M2_KC="$(mktemp -t "${M2}-XXXX.kubeconfig")"
+kind get kubeconfig --name "$M2" > "$M2_KC"
+fleet::register_member "$M2" aks "$M2_KC" prod
+rm -f "$M2_KC"
 wait_for 300 "workload landed + Ready on freshly added member-2" is_ready 2
 
 echo "### criterion 6: per-cloud expansion really differs (the portability claim)"

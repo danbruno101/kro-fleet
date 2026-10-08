@@ -5,6 +5,10 @@ the ideal design in [`docs/proposals/KEP-kro-multicluster.md`](proposals/KEP-kro
 Keep this current as the PoC evolves — it exists so reviewers are never misled into
 thinking the PoC *is* the finished native design.
 
+> **Pins:** every upstream version this ledger assumes is recorded in
+> [`rebaseline-2026-10.md`](rebaseline-2026-10.md) (October 2026) and, for the
+> original PoC, [`phase0-validation.md`](phase0-validation.md).
+
 > **One-line framing:** the PoC proves the **API, UX, and SIG-Multicluster
 > integration** of fleet-scoped KRO objects; it does **not** implement the native,
 > in-kro control loop. That is intentional and is future work.
@@ -15,7 +19,7 @@ thinking the PoC *is* the finished native design.
 |---|---|---|---|
 | **Graph expansion** | Inside kro, on the **hub**, one control loop | **Stock kro on each member** expands the placed instance locally | Avoids forking kro; validates the UX + placement first. Native = a change inside `kubernetes-sigs/kro`. |
 | **New code surface** | A multi-cluster mode *within* kro | A **separate hub placement controller**; kro unmodified | Keeps the PoC small and reviewable. |
-| **Member credentials** | ClusterProfile `status.accessProviders` plugin mechanism (KEP-4322/5339) | **Simplified**: the provider's `Secret` kubeconfig strategy (labeled Secret next to the ClusterProfile, data key `Config`) | ClusterProfile is still the inventory API; only the credential resolution is simplified for kind. The same provider also supports the KEP-5339 `CredentialsProvider` strategy — switching is config, not architecture. |
+| **Member credentials** | ClusterProfile `status.accessProviders` plugin mechanism (KEP-4322/5339) | **As proposed** (since the Oct 2026 re-baseline): every ClusterProfile advertises `status.accessProviders[]`, and the controller resolves the named provider through an exec credential plugin via the provider's AccessProvider strategy — on kind the upstream `kubeconfig-secretreader` plugin, on the clouds each CLI's exec plugin. The controller never reads a kubeconfig Secret itself | Was: the provider's (now deprecated) labeled-Secret strategy. Closed by `docs/rebaseline-2026-10.md`. What remains simplified is *who writes* `accessProviders`: the setup scripts, standing in for a cluster-manager agent (next row). |
 | **Controller packaging** | The KRO control plane runs in-cluster on the hub | **Host process**: `go run ./cmd/fleet-controller` against the hub kubeconfig (`scripts/setup-fleet.sh`) | PoC convenience only; nothing architectural depends on where the controller runs. |
 | **Member health** | A cluster manager agent maintains `status.conditions` (e.g. `ControlPlaneHealthy`) on each ClusterProfile | **Self-asserted**: setup scripts patch `ControlPlaneHealthy=True` manually; the provider's default readiness gate consumes it unchanged | kind members have no cluster-manager agent. The gate itself (engage only healthy profiles) is exercised for real. |
 | **Placement source** | v2 adds `placement.decisionRef` — placement supplied by an external producer (scheduler / policy engine / failover controller) alongside the v1 selector | **Label selector only** | The KEP v2 delta; not yet built. This is the affordance that makes capacity/compliance/failover reachable without kro owning a scheduler. |
@@ -32,7 +36,7 @@ thinking the PoC *is* the finished native design.
 ## What the PoC *does* faithfully prove
 
 Everything below is asserted by `scripts/e2e.sh` (the same script CI runs), on
-kind, against **stock kro 0.9.2** expanding the placed objects on the members.
+kind, against **stock kro 0.9.4** expanding the placed objects on the members.
 - One placement-enabled object on a hub, placed onto matching members, with
   aggregated status — the core UX of the KEP.
 - Integration with **ClusterProfile** (inventory) and **multicluster-runtime**

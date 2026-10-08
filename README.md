@@ -85,7 +85,8 @@ capacity case, and needs the KEP v2 additions; see the design doc.)
 
 ```bash
 scripts/setup-fleet.sh 2                          # 1 hub + 2 member kind clusters
-go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub &
+go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub \
+  --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin &   # built by setup-fleet.sh
 kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.yaml
 kubectl --context kind-kro-fleet-hub get fgs demo-llm -n fleet-demo -o yaml   # status.clusters[]
 scripts/e2e.sh                                    # assert all six success criteria
@@ -95,9 +96,10 @@ scripts/teardown-fleet.sh
 To *see* the fleet — one object across the members, its object graph, pod
 logs — build the [Headlamp plugin](headlamp-plugin/README.md).
 
-See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough, and
-[`docs/phase0-validation.md`](docs/phase0-validation.md) for the pinned
-versions and provider findings this is built on.
+See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough,
+[`docs/rebaseline-2026-10.md`](docs/rebaseline-2026-10.md) for the pinned
+versions, and [`docs/phase0-validation.md`](docs/phase0-validation.md) for the
+original provider findings this is built on.
 
 ## Related
 
