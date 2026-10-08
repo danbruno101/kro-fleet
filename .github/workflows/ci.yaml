@@ -1,7 +1,9 @@
 # Hermetic CI for the kro-fleet PoC: no cloud, no GPU, no secrets.
 # The e2e job is the PoC's proof — it runs scripts/e2e.sh, which stands up
-# 1 hub + 2 member kind clusters and asserts all six success criteria from
-# CLAUDE.md against stock kro on the members.
+# 1 hub + 3 member kind clusters (gke/aks/eks personas, simulated accelerators)
+# and asserts the six success criteria from CLAUDE.md plus the inventory,
+# PlacementDecision, capacity, compliance, drain and gateway scenarios
+# (criteria 7-12) against stock kro on the members.
 name: ci
 
 on:
@@ -33,7 +35,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

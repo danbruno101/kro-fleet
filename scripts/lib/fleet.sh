@@ -112,3 +112,52 @@ fleet::build_plugin() {
   local out=$1
   ( cd "$REPO_ROOT" && go build -o "$out" sigs.k8s.io/cluster-inventory-api/plugins/kubeconfig-secretreader/cmd/plugin )
 }
+
+# fleet::apply_properties <context> <member> <cloud> <region> <cost-tier> <capacity-type> [compliance]
+#
+# Advertises the member's static properties as About API ClusterProperty
+# objects (names per docs/properties.md). Computed ones (gpus-total/free)
+# come from the demo inventory agent, which also mirrors all of them into the
+# member's ClusterProfile on the hub.
+fleet::apply_properties() {
+  local ctx=$1 member=$2 cloud=$3 region=$4 cost_tier=$5 capacity_type=$6 compliance=${7:-}
+  local props="cluster.clusterset.k8s.io=${member} cloud.example.com=${cloud} region.example.com=${region} accelerator.example.com=gpu cost-tier.example.com=${cost_tier} capacity-type.example.com=${capacity_type}"
+  [ -n "$compliance" ] && props="$props compliance.example.com=${compliance}"
+  local kv
+  for kv in $props; do
+    cat <<EOF | kubectl --context "$ctx" apply -f - >/dev/null
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata:
+  name: ${kv%%=*}
+spec:
+  value: "${kv#*=}"
+EOF
+  done
+}
+
+# fleet::set_property <context> <name> <value> — set (or add) one ClusterProperty on a member.
+fleet::set_property() {
+  cat <<EOF | kubectl --context "$1" apply -f - >/dev/null
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata:
+  name: $2
+spec:
+  value: "$3"
+EOF
+}
+
+# fleet::fake_accelerators <context> <resource> <count>
+#
+# Advertises an extended resource on every node of a member — the documented
+# way to add a resource the kubelet knows nothing about (PATCH the node
+# status) — so pods requesting it schedule with zero real accelerators.
+fleet::fake_accelerators() {
+  local ctx=$1 resource=$2 count=$3 node
+  local key="${resource//\//~1}"   # JSON-pointer escape of the '/'
+  for node in $(kubectl --context "$ctx" get nodes -o name); do
+    kubectl --context "$ctx" patch "$node" --subresource=status --type=json \
+      -p "[{\"op\":\"add\",\"path\":\"/status/capacity/${key}\",\"value\":\"${count}\"},{\"op\":\"add\",\"path\":\"/status/allocatable/${key}\",\"value\":\"${count}\"}]" >/dev/null
+  done
+}

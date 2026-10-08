@@ -1,0 +1,117 @@
+# =============================================================================
+# ClusterPlatform ResourceGraphDefinition — fleet variant (platform-team artifact)
+# -----------------------------------------------------------------------------
+# Derived from kro-genaiops-demo rgd/platform-rgd.yaml @ cf7ae45 (the sister
+# project; see its header for the storage-class story). Applied ONCE PER
+# MEMBER by the platform team. It turns the per-cluster environment config
+# into a single KRO-owned object: the genaiops-platform-config ConfigMap the
+# GenAIService fleet RGD reads via externalRef, and — where the cloud does not
+# ship the class — a StorageClass.
+#
+# Fleet delta vs the sister RGD (everything the fleet demo keeps OUT of the
+# developer's spec lives here, per cluster):
+#   * cloud / region            — which cloud this member is; folded into the
+#                                 placed workload's identity (SERVICE_NAME) and
+#                                 used to pick load-balancer annotations.
+#   * acceleratorResource       — what backs "gpu" on this cluster:
+#                                 example.com/gpu (simulated) or nvidia.com/gpu.
+#   * servingImage/CPU/Memory   — what runs in gpu mode: the mock stand-in on
+#                                 simulated capacity, vLLM on real GPUs.
+#   * identityAnnotation/identity — the cloud's workload identity binding for
+#                                 the serving ServiceAccount (GKE Workload
+#                                 Identity, EKS IRSA/Pod Identity, AKS workload
+#                                 identity); empty = no binding.
+# The developer's GenAIService is byte-identical on every cluster and in both
+# simulated and real-GPU modes; only this object differs.
+# =============================================================================
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: clusterplatform.kro.run
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClusterPlatform
+    spec:
+      # Which cloud this member is (gke | aks | eks | kind); also a label.
+      cloud: string | default="kind"
+      # Region the member runs in (informational; mirrored as a property by
+      # the inventory agent when advertised as a ClusterProperty).
+      region: string | default=""
+      # The class name GenAI workloads use on this cluster. The fleet RGD
+      # requires a value (StatefulSet volumeClaimTemplates cannot "omit" the
+      # field the way the sister's PVC pair did).
+      storageClass: string | default=""
+      # true  -> KRO creates the StorageClass below (EKS, or any kind sim).
+      # false -> the class already exists on the cluster (GKE/AKS); ConfigMap only.
+      manageStorageClass: boolean | default=false
+      # The CSI provisioner for the class KRO creates. kind: rancher.io/local-path.
+      #   GKE  pd.csi.storage.gke.io   AKS  disk.csi.azure.com   EKS Auto Mode  ebs.csi.eks.amazonaws.com
+      provisioner: string | default="rancher.io/local-path"
+      # StorageClass.parameters.type (e.g. gp3 on EKS, pd-ssd on GKE). Empty omits it.
+      volumeType: string | default=""
+      # EKS gp3 wants encryption on; adds parameters.encrypted="true" when set.
+      encrypted: boolean | default=false
+      # Mark the created class the cluster default.
+      makeDefault: boolean | default=true
+      # What backs "gpu" on this cluster: a fake extended resource for
+      # rehearsals, the real device plugin's resource on GPU node pools.
+      acceleratorResource: string | default="example.com/gpu"
+      # What serves in gpu mode on this cluster (mock stand-in vs vLLM).
+      servingImage: string | default="ghcr.io/danbruno101/mock-vllm:demo"
+      servingCPU: string | default="100m"
+      servingMemory: string | default="128Mi"
+      # Workload identity binding for the serving ServiceAccount, e.g.
+      #   GKE: iam.gke.io/gcp-service-account = <sa>@<project>.iam.gserviceaccount.com
+      #   EKS: eks.amazonaws.com/role-arn     = arn:aws:iam::<acct>:role/<role>
+      #   AKS: azure.workload.identity/client-id = <client-id>
+      identityAnnotation: string | default=""
+      identity: string | default=""
+    status:
+      # Safe reference to an always-present resource (the ConfigMap).
+      platformConfig: '${configMap.metadata.name}'
+
+  resources:
+    # The object the GenAIService fleet RGD reads via externalRef. Always
+    # created, so KRO — not a hand-applied manifest — owns the per-cluster
+    # choices. Every key is always present (possibly empty) so the consuming
+    # RGD's CEL never dereferences a missing key.
+    - id: configMap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: genaiops-platform-config
+          labels:
+            demo.genaiops/cloud: '${schema.spec.cloud}'
+            app.kubernetes.io/managed-by: kro
+        data:
+          cloud: '${schema.spec.cloud}'
+          region: '${schema.spec.region}'
+          storageClass: '${schema.spec.storageClass}'
+          acceleratorResource: '${schema.spec.acceleratorResource}'
+          servingImage: '${schema.spec.servingImage}'
+          servingCPU: '${schema.spec.servingCPU}'
+          servingMemory: '${schema.spec.servingMemory}'
+          identityAnnotation: '${schema.spec.identityAnnotation}'
+          identity: '${schema.spec.identity}'
+
+    # Created ONLY where the cloud doesn't ship the class (EKS, kind sims).
+    - id: storageClass
+      includeWhen:
+        - ${schema.spec.manageStorageClass}
+      template:
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: '${schema.spec.storageClass}'
+          labels:
+            demo.genaiops/cloud: '${schema.spec.cloud}'
+            app.kubernetes.io/managed-by: kro
+          annotations:
+            storageclass.kubernetes.io/is-default-class: '${schema.spec.makeDefault ? "true" : "false"}'
+        provisioner: '${schema.spec.provisioner}'
+        # CEL-conditional map: encrypted -> {type,encrypted}; else type only; else {}.
+        parameters: '${schema.spec.encrypted ? {"type": schema.spec.volumeType, "encrypted": "true"} : (schema.spec.volumeType != "" ? {"type": schema.spec.volumeType} : {})}'
+        volumeBindingMode: WaitForFirstConsumer
+        reclaimPolicy: Delete
