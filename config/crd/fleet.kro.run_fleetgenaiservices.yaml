@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: fleetgenaiservices.fleet.kro.run
 spec:
   group: fleet.kro.run
@@ -23,6 +23,15 @@ spec:
     - jsonPath: .status.summary.ready
       name: Ready
       type: integer
+    - jsonPath: .status.summary.readyReplicas
+      name: Replicas
+      type: string
+    - jsonPath: .status.summary.requestedReplicas
+      name: Requested
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Placed")].reason
+      name: PlacedCond
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -31,7 +40,7 @@ spec:
       openAPIV3Schema:
         description: |-
           FleetGenAIService is one GenAIService authored once on the hub and placed
-          onto every member cluster matching the placement selector.
+          onto the members its placement resolves to.
         properties:
           apiVersion:
             description: |-
@@ -56,14 +65,15 @@ spec:
               place, and where.
             properties:
               placement:
-                description: Placement selects member clusters from the ClusterProfile
-                  inventory.
+                description: |-
+                  Placement says where the template goes. Platform-owned: the
+                  developer's template never names a cluster, a cloud or a region.
                 properties:
                   clusterSelector:
                     description: |-
                       ClusterSelector selects ClusterProfile objects by label. An empty
                       selector matches no clusters (explicit opt-in, no accidental
-                      fleet-wide blast).
+                      fleet-wide blast). Mutually exclusive with decisionRef/placementKey.
                     properties:
                       matchExpressions:
                         description: matchExpressions is a list of label selector
@@ -108,22 +118,64 @@ spec:
                         type: object
                     type: object
                     x-kubernetes-map-type: atomic
+                  decisionRef:
+                    description: |-
+                      DecisionRef names a PlacementDecision in this namespace to consume.
+                      The decision is read-only input; its producer owns it.
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  placementKey:
+                    description: |-
+                      PlacementKey discovers PlacementDecision slices in this namespace by
+                      the multicluster.x-k8s.io/placement-key label (KEP-5313's recommended
+                      discovery); slices are merged in multicluster.x-k8s.io/decision-index
+                      order. Mutually exclusive with decisionRef.
+                    type: string
+                  requirements:
+                    description: |-
+                      Requirements are hard constraints every decided cluster must satisfy.
+                      They are INPUT to the producer and a GUARD here: kro-fleet never
+                      selects clusters with them, but it refuses — as a whole, placing
+                      nothing — a decision that names a cluster violating them
+                      (Placed=False/DecisionViolatesRequirements). There is no graceful
+                      fallback for a hard constraint.
+                    properties:
+                      matchProperties:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          MatchProperties requires each named property (About API /
+                          ClusterProfile.status.properties name) to be present on the member's
+                          ClusterProfile with exactly this value.
+                        type: object
+                    type: object
                   tolerance:
                     description: |-
-                      Tolerance controls how partial failure folds into the rolled-up
+                      Tolerance controls how partial readiness folds into the rolled-up
                       Ready condition.
                     properties:
                       minReadyClusters:
                         description: |-
                           MinReadyClusters is the number of placed clusters that must report
-                          ready for the FleetGenAIService's Ready condition to be True.
-                          Unset means "all placed clusters".
+                          ready for Ready to be True when the template is replicated (no
+                          per-member replica parameters). Unset means "all placed clusters".
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      minReadyReplicas:
+                        description: |-
+                          MinReadyReplicas is the number of ready replicas, summed across
+                          members, required for Ready to be True when the template is divided
+                          (the decision carries per-member replicas). Unset means "all requested
+                          replicas" (the template's replicas).
                         format: int32
                         minimum: 0
                         type: integer
                     type: object
-                required:
-                - clusterSelector
                 type: object
               template:
                 description: |-
@@ -134,8 +186,9 @@ spec:
                   spec:
                     description: |-
                       Spec is the GenAIService spec, passed through verbatim to each
-                      member. It is intentionally unvalidated here: its schema is owned by
-                      the members' ResourceGraphDefinition (stock kro).
+                      member — except for values a decision's per-member parameters
+                      override (today: replicas). It is intentionally unvalidated here: its
+                      schema is owned by the members' ResourceGraphDefinition (stock kro).
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                 required:
@@ -152,14 +205,24 @@ spec:
             properties:
               clusters:
                 description: |-
-                  Clusters holds one entry per member the object is (or was last)
-                  placed on. This doubles as the PoC's applied-manifest inventory:
-                  members listed here are exactly those the controller must clean up
-                  on unplacement or deletion (see docs/KEP-GAP.md).
+                  Clusters holds one readiness entry per member the object is placed on
+                  (plus members pending removal). It is a view, not the inventory: what
+                  was applied where is tracked per (instance, member) in
+                  AppliedManifestRecord objects, which drive unplacement and teardown.
                 items:
                   description: ClusterStatus is the per-member slice of the fleet
                     view.
                   properties:
+                    assignedReplicas:
+                      description: AssignedReplicas is the replica count this member's
+                        copy was given.
+                      format: int32
+                      type: integer
+                    endpoint:
+                      description: |-
+                        Endpoint is the member's externally reachable endpoint for this
+                        copy, when the member reports one (e.g. its cloud load balancer).
+                      type: string
                     message:
                       description: |-
                         Message carries a human-oriented note (e.g. why not ready, or that
@@ -174,6 +237,11 @@ spec:
                         Ready reports whether the placed GenAIService is ready on this
                         member (kro instance state ACTIVE or a true Ready condition).
                       type: boolean
+                    readyReplicas:
+                      description: ReadyReplicas is the member's reported ready replica
+                        count.
+                      format: int32
+                      type: integer
                   required:
                   - name
                   - ready
@@ -181,8 +249,8 @@ spec:
                 type: array
               conditions:
                 description: |-
-                  Conditions holds the rolled-up conditions; Ready is computed from
-                  per-member readiness and spec.placement.tolerance.
+                  Conditions: Placed (did the placement resolve, and to what) and Ready
+                  (per-member readiness folded through spec.placement.tolerance).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -243,9 +311,64 @@ spec:
                   upon.
                 format: int64
                 type: integer
-              summary:
-                description: Summary counts placements for quick fleet-level reading.
+              placement:
+                description: |-
+                  Placement records the resolved decision — where the copies were sent
+                  and why — so it can be shown after the fact.
                 properties:
+                  clusters:
+                    description: Clusters is the resolved member set, in decision
+                      order.
+                    items:
+                      description: PlacedCluster is one member of the resolved placement.
+                      properties:
+                        name:
+                          description: Name is the ClusterProfile name.
+                          type: string
+                        parameters:
+                          additionalProperties:
+                            type: string
+                          description: Parameters are the per-member parameters applied
+                            to this member's copy.
+                          type: object
+                        reason:
+                          description: Reason is the producer's per-cluster reason,
+                            when set.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  decisionNames:
+                    description: DecisionNames lists the PlacementDecision slice(s)
+                      consumed.
+                    items:
+                      type: string
+                    type: array
+                  reason:
+                    description: |-
+                      Reason is the decision-level reason the producer gave (why the
+                      decision is empty or partial), when set.
+                    type: string
+                  schedulerName:
+                    description: SchedulerName is the decision's schedulerName, when
+                      set.
+                    type: string
+                  source:
+                    description: Source is ClusterSelector or PlacementDecision.
+                    type: string
+                required:
+                - source
+                type: object
+              summary:
+                description: Summary counts placements and replicas for quick fleet-level
+                  reading.
+                properties:
+                  assignedReplicas:
+                    description: AssignedReplicas is the sum of replicas the decision
+                      assigned.
+                    format: int32
+                    type: integer
                   placed:
                     description: Placed is the number of members the object is currently
                       applied to.
@@ -253,6 +376,16 @@ spec:
                     type: integer
                   ready:
                     description: Ready is the number of those members reporting ready.
+                    format: int32
+                    type: integer
+                  readyReplicas:
+                    description: ReadyReplicas is the sum of ready replicas reported
+                      by members.
+                    format: int32
+                    type: integer
+                  requestedReplicas:
+                    description: RequestedReplicas is the total the template asks
+                      for.
                     format: int32
                     type: integer
                 required:

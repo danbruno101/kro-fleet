@@ -15,10 +15,16 @@ limitations under the License.
 */
 
 // The hub-side fleet placement controller: watches FleetGenAIService objects
-// on the hub, resolves placement against the ClusterProfile inventory
-// (cluster-inventory-api, KEP-4322), and reconciles the wrapped GenAIService
-// into each matching member via multicluster-runtime. Members run stock kro;
-// this controller never expands the graph itself.
+// on the hub, consumes their placement — an inline selector or a
+// PlacementDecision (KEP-5313) written by something else — against the
+// ClusterProfile inventory (cluster-inventory-api, KEP-4322), and reconciles
+// the wrapped GenAIService into each decided member via multicluster-runtime,
+// keeping a per-(instance, member) applied-manifest inventory. Members run
+// stock kro; this controller never expands the graph and never computes a
+// placement.
+//
+// Member credentials come from ClusterProfile.status.accessProviders; see
+// internal/hub for the provider wiring and its flags.
 package main
 
 import (
@@ -26,92 +32,46 @@ import (
 	"fmt"
 	"os"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	clusterinventoryv1alpha1 "sigs.k8s.io/cluster-inventory-api/apis/v1alpha1"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
-	clusterinventoryapi "sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api"
-	"sigs.k8s.io/multicluster-runtime/providers/cluster-inventory-api/kubeconfigstrategy"
-
-	fleetv1alpha1 "github.com/danbruno101/kro-fleet/api/v1alpha1"
 	"github.com/danbruno101/kro-fleet/internal/controller"
+	"github.com/danbruno101/kro-fleet/internal/hub"
 )
 
 func main() {
-	var hubKubeconfig, hubContext, fleetNamespace, consumerName string
-	flag.StringVar(&hubKubeconfig, "hub-kubeconfig", "", "path to a kubeconfig with hub access (default: $KUBECONFIG, then ~/.kube/config, then in-cluster)")
-	flag.StringVar(&hubContext, "hub-context", "", "kubeconfig context of the hub cluster (current context if empty)")
-	flag.StringVar(&fleetNamespace, "fleet-namespace", "fleet-system", "hub namespace holding ClusterProfiles and kubeconfig Secrets")
-	flag.StringVar(&consumerName, "consumer-name", "kro-fleet", "cluster-inventory consumer name for the Secret kubeconfig strategy")
+	var opts hub.Options
+	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrllog.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrllog.Log.WithName("fleet-controller")
 
-	if err := run(hubKubeconfig, hubContext, fleetNamespace, consumerName); err != nil {
+	if err := run(opts); err != nil {
 		log.Error(err, "fleet controller failed")
 		os.Exit(1)
 	}
 }
 
-func run(hubKubeconfig, hubContext, fleetNamespace, consumerName string) error {
+func run(opts hub.Options) error {
 	ctx := signals.SetupSignalHandler()
 
-	// Standard loading order: --hub-kubeconfig, else $KUBECONFIG, else
-	// ~/.kube/config, else in-cluster (when running on the hub itself).
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	loadingRules.ExplicitPath = hubKubeconfig
-	hubCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules,
-		&clientcmd.ConfigOverrides{CurrentContext: hubContext},
-	).ClientConfig()
+	mgr, cleanup, err := hub.NewManager(opts)
+	defer cleanup()
 	if err != nil {
-		if hubKubeconfig == "" && hubContext == "" {
-			var inClusterErr error
-			if hubCfg, inClusterErr = rest.InClusterConfig(); inClusterErr != nil {
-				return fmt.Errorf("failed to load hub config from kubeconfig (%v) or in-cluster (%v)", err, inClusterErr)
-			}
-		} else {
-			return fmt.Errorf("failed to load hub config: %w", err)
-		}
+		return err
 	}
 
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(clusterinventoryv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(fleetv1alpha1.AddToScheme(scheme))
-
-	provider, err := clusterinventoryapi.New(clusterinventoryapi.Options{
-		KubeconfigStrategyOption: kubeconfigstrategy.Option{
-			Secret: &kubeconfigstrategy.SecretStrategyOption{ConsumerName: consumerName},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create cluster-inventory-api provider: %w", err)
-	}
-
-	mgr, err := mcmanager.New(hubCfg, provider, mcmanager.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create multicluster manager: %w", err)
-	}
-	if err := provider.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("failed to set up provider: %w", err)
-	}
-
-	r := &controller.FleetReconciler{FleetNamespace: fleetNamespace}
+	r := &controller.FleetReconciler{FleetNamespace: opts.FleetNamespace}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed to set up fleet controller: %w", err)
+	}
+	// Orphaned inventory records (instance gone, member unreachable at the
+	// time) are settled separately, when their member is engaged again.
+	rr := &controller.RecordReconciler{FleetNamespace: opts.FleetNamespace}
+	if err := rr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to set up record controller: %w", err)
 	}
 
 	return mgr.Start(ctx)

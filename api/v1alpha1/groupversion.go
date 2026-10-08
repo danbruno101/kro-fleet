@@ -17,8 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // AddToScheme registers the fleet types with a scheme.
@@ -26,6 +26,8 @@ func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
 		&FleetGenAIService{},
 		&FleetGenAIServiceList{},
+		&AppliedManifestRecord{},
+		&AppliedManifestRecordList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

@@ -1,7 +1,9 @@
 # Hermetic CI for the kro-fleet PoC: no cloud, no GPU, no secrets.
 # The e2e job is the PoC's proof — it runs scripts/e2e.sh, which stands up
-# 1 hub + 2 member kind clusters and asserts all six success criteria from
-# CLAUDE.md against stock kro on the members.
+# 1 hub + 3 member kind clusters (gke/aks/eks personas, simulated accelerators)
+# and asserts the six success criteria from CLAUDE.md plus the inventory,
+# PlacementDecision, capacity, compliance, drain and gateway scenarios
+# (criteria 7-12) against stock kro on the members.
 name: ci
 
 on:
@@ -10,9 +12,9 @@ on:
   pull_request:
 
 env:
-  KIND_VERSION: v0.32.0
-  KUBECTL_VERSION: v1.36.2
-  HELM_VERSION: v4.2.2
+  KIND_VERSION: v0.33.0
+  KUBECTL_VERSION: v1.37.1
+  HELM_VERSION: v4.3.0
 
 jobs:
   unit:
@@ -30,10 +32,16 @@ jobs:
           go tool controller-gen crd paths=./api/... output:crd:dir=config/crd
           git diff --exit-code -- api config/crd || { echo "generated code drifted: run controller-gen and commit"; exit 1; }
           go test ./...
+      - name: Cloud demo scripts, dry-run (no cloud CLI, nothing created)
+        run: |
+          for s in provision demo reset teardown; do
+            scripts/$s.sh --dry-run --yes --no-pause > "/tmp/$s.log" 2>&1 || { cat "/tmp/$s.log"; exit 1; }
+          done
+          grep -q 'eksctl create cluster' /tmp/provision.log && grep -q 'delete fgs' /tmp/demo.log && echo "dry-runs ok"
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

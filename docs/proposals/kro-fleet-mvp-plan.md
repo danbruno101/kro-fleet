@@ -51,7 +51,7 @@ Already merged and e2e-proven in this repo (see `cmd/`, `api/`, `internal/`,
 - Hub placement controller on **multicluster-runtime + ClusterProfile**: place →
   track applied manifests → finalizer GC → aggregate `status.clusters[]` + rolled-up
   condition.
-- Stock kro (pinned, currently 0.9.2) expands the placed instance on each member.
+- Stock kro (pinned, currently 0.9.4) expands the placed instance on each member.
 
 **MVP delta for the controller:** run the demo with **three members**
 (`scripts/setup-fleet.sh 3` — the scripts are already N-member), label the members
@@ -75,7 +75,7 @@ A TypeScript/React [Headlamp](https://headlamp.dev) plugin, living in
    copies underneath, statuses live.
 3. **The object graph** — a custom **map source** feeding Headlamp's resource-map
    view: hub `FleetGenAIService` → placed `GenAIService` per member → the kro-expanded
-   children (Deployment/Service/PVC/…) on that member.
+   children (StatefulSet/Service/PVC/…) on that member.
 4. **Pod logs** — click through from a placed workload to its pods' logs, so the
    demo ends on "and here is the model server actually serving, on cluster 3."
 

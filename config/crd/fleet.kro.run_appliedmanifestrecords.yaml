@@ -1,0 +1,226 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: appliedmanifestrecords.fleet.kro.run
+spec:
+  group: fleet.kro.run
+  names:
+    kind: AppliedManifestRecord
+    listKind: AppliedManifestRecordList
+    plural: appliedmanifestrecords
+    shortNames:
+    - amr
+    singular: appliedmanifestrecord
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.instanceRef.name
+      name: Instance
+      type: string
+    - jsonPath: .spec.cluster.name
+      name: Cluster
+      type: string
+    - jsonPath: .spec.manifests[*]
+      name: Intended
+      priority: 1
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Applied")].status
+      name: Applied
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Orphaned")].status
+      name: Orphaned
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AppliedManifestRecord is the hub-side applied-manifest inventory for one
+          (FleetGenAIService, member) pair — conceptually OCM's AppliedManifestWork.
+          Ownership cannot cross a cluster boundary, so this record is what makes
+          unplacement, finalizer-driven teardown and drift pruning exact: the
+          controller deletes precisely the objects recorded here, and nothing else.
+          There is exactly one record per placement; it has no ownerReference on
+          purpose — its lifecycle is explicit, and a record whose member vanished
+          before cleanup survives as the ledger of possibly orphaned objects.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AppliedManifestRecordSpec is the intent half of the record.
+            properties:
+              cluster:
+                description: |-
+                  Cluster is the member the manifests are applied to, as the
+                  ClusterProfile's namespace/name on the hub.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              instanceRef:
+                description: |-
+                  InstanceRef names the FleetGenAIService this record belongs to (same
+                  namespace as the record).
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              manifests:
+                description: |-
+                  Manifests is the set the controller intends to apply on the member,
+                  keyed by GVK/namespace/name. It is written BEFORE the member is
+                  touched, so a crash between an apply and the status write can never
+                  leave an object the inventory does not know about.
+                items:
+                  description: 'ManifestIdentifier is the inventory key: one object
+                    on one member.'
+                  properties:
+                    group:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  - version
+                  type: object
+                type: array
+            required:
+            - cluster
+            - instanceRef
+            type: object
+          status:
+            description: AppliedManifestRecordStatus is the observed half of the record.
+            properties:
+              applied:
+                description: |-
+                  Applied lists the manifests confirmed on the member. Entries that are
+                  no longer in spec.manifests are pruned from the member, then dropped.
+                items:
+                  description: AppliedManifest is a manifest confirmed on the member.
+                  properties:
+                    group:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    parameters:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Parameters are the per-member values this copy was rendered with
+                        (e.g. replicas), for inventory readability.
+                      type: object
+                    uid:
+                      description: |-
+                        UID of the object on the member, used as a delete precondition so a
+                        same-named object created by someone else is never removed.
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  - version
+                  type: object
+                type: array
+              conditions:
+                description: 'Conditions: Applied, Orphaned.'
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

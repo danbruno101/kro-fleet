@@ -37,3 +37,7 @@ go.work.sum
 
 # Local fleet credentials (scripts/headlamp-kubeconfig.sh) — never commit
 *.kubeconfig
+
+# Demo state (built binaries, access-provider config, pids) and step logs — never commit
+/.fleet/
+/logs/

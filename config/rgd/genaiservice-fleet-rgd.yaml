@@ -1,0 +1,229 @@
+# =============================================================================
+# GenAIService ResourceGraphDefinition — fleet variant (platform-team artifact)
+# -----------------------------------------------------------------------------
+# Derived from kro-genaiops-demo rgd/genaiops-rgd.yaml @ cf7ae45 (the sister
+# project). Same developer-facing API: kind GenAIService, the same seven
+# fields, byte-identical on kind, EKS, GKE and AKS. Applied once per member.
+#
+# Fleet delta vs the sister RGD — every item is something the demo keeps OUT
+# of the developer's spec and resolves per cluster from the platform
+# ConfigMap (clusterplatform-fleet-rgd.yaml):
+#   * StatefulSet + volumeClaimTemplates instead of Deployment + one shared
+#     ReadWriteOnce PVC: N replicas on a multi-node cluster each get their own
+#     cache volume in the cluster's storage class, so a divided placement
+#     (4 here, 2 there) actually runs. persistentVolumeClaimRetentionPolicy
+#     Delete keeps "one delete cleans everything" true.
+#   * A LoadBalancer Service ("exposure") with per-cloud annotations: each
+#     member exposes its slice through its own cloud load balancer, and the
+#     endpoint is surfaced as status.externalEndpoint for the hub to collect.
+#   * A ServiceAccount carrying the cloud's workload-identity annotation.
+#   * "gpu" mode requests the accelerator resource the platform names and runs
+#     the image the platform names (mock stand-in on simulated capacity, vLLM
+#     on real GPUs), with platform-sized requests.
+#   * SERVICE_NAME=<name>@<cloud>, so the mock's reply names the cloud it ran on.
+#
+# Mock mode is unchanged from the sister: CPU-only, runs anywhere.
+# =============================================================================
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: genaiservice.kro.run
+spec:
+  # --- The API surface developers see (SimpleSchema) — unchanged -------------
+  schema:
+    apiVersion: v1alpha1
+    kind: GenAIService
+    spec:
+      name: string
+      model: string | default="Qwen/Qwen2.5-0.5B-Instruct"
+      # Replicas of the serving StatefulSet. Each replica gets its own cache
+      # volume, so any count works on any cluster.
+      replicas: integer | default=1
+      # "mock" runs anywhere (CPU, zero GPU). "gpu" asks for an accelerator;
+      # the platform decides what backs it on this cluster.
+      mode: string | default="mock"
+      # Storage size for each replica's model cache volume.
+      cacheSize: string | default="8Gi"
+      # Optional developer override. Empty (the default) defers to the platform
+      # team's per-cluster choice in the genaiops-platform-config ConfigMap.
+      storageClass: string | default=""
+      # Toggle Prometheus scraping wiring on/off.
+      monitoring: boolean | default=true
+    status:
+      # Surfaced back onto the GenAIService object for `kubectl get` and for
+      # the hub's per-member aggregation.
+      endpoint: '${service.spec.clusterIP}'
+      externalEndpoint: '${has(exposure.status.loadBalancer) && has(exposure.status.loadBalancer.ingress) && size(exposure.status.loadBalancer.ingress) > 0 ? (has(exposure.status.loadBalancer.ingress[0].hostname) ? exposure.status.loadBalancer.ingress[0].hostname : exposure.status.loadBalancer.ingress[0].ip) : ""}'
+      readyReplicas: '${statefulset.status.readyReplicas}'
+      # NOT named `conditions`: kro reserves status.conditions for the
+      # instance's own conditions (and rejects the collision since v0.9.3).
+      serverConditions: '${statefulset.status.conditions}'
+
+  resources:
+    # 0) Platform config (READ-ONLY external reference, one per cluster),
+    #    created by KRO from a ClusterPlatform instance. This RGD only READS
+    #    it: the same RGD and the same instance apply on every cloud, and this
+    #    object supplies the environment-specific values.
+    - id: platformConfig
+      externalRef:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: genaiops-platform-config
+
+    # 1) Identity: the ServiceAccount the serving pods run as, bound to the
+    #    cloud's workload identity when the platform names one. The developer
+    #    never names an IAM role, a GCP service account or an Entra client.
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: '${schema.spec.name}'
+          labels:
+            app: '${schema.spec.name}'
+            app.kubernetes.io/managed-by: kro
+          annotations: '${platformConfig.data.identityAnnotation != "" ? {platformConfig.data.identityAnnotation: platformConfig.data.identity} : {}}'
+
+    # 2) The serving StatefulSet (vLLM-compatible interface).
+    - id: statefulset
+      template:
+        apiVersion: apps/v1
+        kind: StatefulSet
+        metadata:
+          name: '${schema.spec.name}'
+          labels:
+            app: '${schema.spec.name}'
+            app.kubernetes.io/managed-by: kro
+            genaiops.kro.run/service: '${schema.spec.name}'
+        spec:
+          serviceName: '${schema.spec.name}'
+          replicas: '${schema.spec.replicas}'
+          # Replicas are independent: start them all at once.
+          podManagementPolicy: Parallel
+          # One delete reclaims the volumes too.
+          persistentVolumeClaimRetentionPolicy:
+            whenDeleted: Delete
+            whenScaled: Delete
+          selector:
+            matchLabels:
+              app: '${schema.spec.name}'
+          template:
+            metadata:
+              labels:
+                app: '${schema.spec.name}'
+                genaiops.kro.run/service: '${schema.spec.name}'
+              annotations:
+                prometheus.io/scrape: '${schema.spec.monitoring ? "true" : "false"}'
+                prometheus.io/port: "8000"
+                prometheus.io/path: "/metrics"
+            spec:
+              serviceAccountName: '${serviceAccount.metadata.name}'
+              containers:
+                - name: server
+                  # mock mode: the tiny OpenAI-compatible stub. gpu mode: whatever
+                  # the platform says backs "gpu" here (the stub on simulated
+                  # capacity, vLLM on real GPUs).
+                  image: '${schema.spec.mode == "gpu" ? platformConfig.data.servingImage : "ghcr.io/danbruno101/mock-vllm:demo"}'
+                  args: ["--model", "${schema.spec.model}"]
+                  ports:
+                    - name: http
+                      containerPort: 8000
+                  env:
+                    - name: MODEL_NAME
+                      value: '${schema.spec.model}'
+                    - name: SERVICE_NAME
+                      value: '${schema.spec.name + "@" + platformConfig.data.cloud}'
+                  resources:
+                    requests:
+                      cpu: '${schema.spec.mode == "gpu" ? platformConfig.data.servingCPU : "100m"}'
+                      memory: '${schema.spec.mode == "gpu" ? platformConfig.data.servingMemory : "128Mi"}'
+                    # The accelerator request appears ONLY in gpu mode, and names
+                    # whatever resource the platform backs it with on this cluster.
+                    limits: '${schema.spec.mode == "gpu" ? {platformConfig.data.acceleratorResource: "1"} : {}}'
+                  volumeMounts:
+                    - name: cache
+                      mountPath: /root/.cache
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 8000
+                    initialDelaySeconds: 3
+                    periodSeconds: 5
+          # Per-replica cache in the cluster's storage class: the developer's
+          # override, else the platform's per-cluster value.
+          volumeClaimTemplates:
+            - metadata:
+                name: cache
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: '${schema.spec.storageClass != "" ? schema.spec.storageClass : platformConfig.data.storageClass}'
+                resources:
+                  requests:
+                    storage: '${schema.spec.cacheSize}'
+
+    # 3) Service: stable in-cluster endpoint (and the StatefulSet's serviceName).
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: '${schema.spec.name}'
+          labels:
+            app: '${schema.spec.name}'
+            genaiops.kro.run/service: '${schema.spec.name}'
+        spec:
+          selector:
+            app: '${schema.spec.name}'
+          ports:
+            - name: http
+              port: 80
+              targetPort: 8000
+
+    # 4) Exposure: this cluster's own cloud load balancer in front of its
+    #    slice. The developer never names a load-balancer type; the platform's
+    #    cloud picks the annotations (EKS Auto Mode wants an NLB with IP
+    #    targets; GKE and AKS provision their external L4 LB with none; kind
+    #    gets one from cloud-provider-kind).
+    - id: exposure
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: '${schema.spec.name}-lb'
+          labels:
+            app: '${schema.spec.name}'
+            genaiops.kro.run/service: '${schema.spec.name}'
+          annotations: '${platformConfig.data.cloud == "eks" ? {"service.beta.kubernetes.io/aws-load-balancer-type": "external", "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type": "ip", "service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing"} : {}}'
+        spec:
+          type: LoadBalancer
+          selector:
+            app: '${schema.spec.name}'
+          ports:
+            - name: http
+              port: 80
+              targetPort: 8000
+
+    # 5) Monitoring wiring, included ONLY when spec.monitoring is true.
+    - id: monitor
+      includeWhen:
+        - ${schema.spec.monitoring}
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.spec.name}-metrics
+          labels:
+            app: '${schema.spec.name}'
+            genaiops.kro.run/scrape: "true"
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "8000"
+            prometheus.io/path: "/metrics"
+        spec:
+          selector:
+            app: '${schema.spec.name}'
+          ports:
+            - name: metrics
+              port: 8000
+              targetPort: 8000

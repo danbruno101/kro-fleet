@@ -230,7 +230,9 @@ repository's PoC** — including the parts that are genuinely hard: credentials 
 ClusterProfile `accessProviders`, hub-side applied-manifest tracking, and
 finalizer-driven teardown with no orphans. KEP v2 extends it with `decisionRef`
 (placement supplied by an external producer) and per-member parameters, which is
-what makes capacity reachable without KRO owning a scheduler.
+what makes capacity reachable without KRO owning a scheduler; v2.1 binds that
+to KEP-5313 `PlacementDecision` and the PoC runs it end to end (see
+`docs/KEP-GAP.md` for exactly what runs).
 
 ## Approach 2: placement groups inside one instance
 
@@ -511,12 +513,11 @@ On delete, or when a member leaves the placement, exactly the tracked objects ar
 removed from that member and the record cleared. Within each member, ordinary
 `ownerReferences` and SSA field ownership still apply to the local sub-graph.
 
-Two honest caveats, both tracked in `docs/KEP-GAP.md`: the PoC currently lets
-`status.clusters[]` double as the inventory, which is valid only while each
-member receives exactly one identical object (per-member parameters break that
-assumption and require the real per-GVK/name record); and a member whose
-ClusterProfile is deleted *before* cleanup is skipped, orphaning its copy on a
-now-unreachable cluster.
+Two honest caveats, both tracked in `docs/KEP-GAP.md`: the inventory is kept
+on the hub as one record per `(instance, member)`, so a member whose
+ClusterProfile is deleted *before* cleanup leaves a record marked orphaned —
+surfaced, and settled if the member returns, but not reclaimable while it is
+gone; and nothing reaps a record whose member never returns.
 
 The question for this group is therefore narrower than "how do we do
 cross-cluster GC": is hub-side tracking plus a finalizer the pattern this group

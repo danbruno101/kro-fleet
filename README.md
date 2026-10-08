@@ -17,11 +17,13 @@ implementation:
   external decision (`decisionRef`) — never something it computes.
 
 > **Status:** discussion-stage PoC. Built on kro `v1alpha1` and SIG-Multicluster
-> primitives (ClusterProfile / KEP-4322, `multicluster-runtime`). **Not for
-> production.** Runs entirely on `kind` — no cloud account, no GPU.
-> The PoC implements the KEP's **v1 scope** (label-selector placement,
-> replication); the v2 additions (`decisionRef`, per-member parameters,
-> terminal refusal on empty placement) are proposed, not built — the delta is
+> primitives (ClusterProfile / KEP-4322, PlacementDecision / KEP-5313, About
+> API / KEP-2149, `multicluster-runtime`). **Not for production.** CI runs
+> entirely on `kind` — no cloud account, no GPU; the KubeCon EU 2027 demo runs
+> the same code on EKS + GKE + AKS ([`docs/demo-cloud.md`](docs/demo-cloud.md)).
+> The PoC implements the KEP's **v2.1 scope**: selector or consumed
+> `PlacementDecision`, per-member replicas (division), fail-closed `Placed`,
+> per-member inventory. What still differs from the native design is
 > ledgered in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
 
 ## The idea
@@ -38,10 +40,13 @@ cluster boundary, so "the same workload on N clusters" is N independent objects,
 applied N times, with N control loops and no aggregated view.
 
 `kro-fleet` closes that gap: **one placement-enabled object on a hub cluster** →
-placed onto the matching member clusters → **status aggregated back on the hub.**
-Change it once, apply it once, it disperses. (This is *replication* — every
-member gets the whole graph. Dividing one workload across members is the
-capacity case, and needs the KEP v2 additions; see the design doc.)
+placed onto the member clusters a placement resolves to → **status aggregated
+back on the hub.** Change it once, apply it once, it disperses. Placement is
+either an inline selector (*replication*: every member gets the whole graph)
+or a standard `PlacementDecision` written by something else (*division*: a
+model server asking for 8 replicas that no single cluster can hold lands as
+4 + 2 + 2 across clouds, with one rolled-up Ready). kro-fleet consumes the
+decision; it never computes one.
 
 ## Scope (important, and settled)
 
@@ -54,10 +59,18 @@ capacity case, and needs the KEP v2 additions; see the design doc.)
     (KEP-4322) for the fleet registry + member credentials.
   - **[multicluster-runtime](https://github.com/kubernetes-sigs/multicluster-runtime)**
     for reconciling across a dynamic fleet.
-- The "native mode inside kro" (expand-on-hub, one control loop) and the KEP
-  v2 additions (`decisionRef`, per-member parameters, terminal refusal, decision
-  provenance) are **future work** — every proposed-vs-built difference is
-  tracked honestly in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
+  - **[PlacementDecision](https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/5313-placement-decision-api)**
+    (KEP-5313) as the placement input, and **[About API `ClusterProperty`](https://github.com/kubernetes-sigs/about-api)**
+    (KEP-2149) for what each cluster advertises — the two things the standard
+    does not carry (per-member parameters, a decision-level reason) are
+    conventions written up for the SIG in [`docs/placement-decision-gaps.md`](docs/placement-decision-gaps.md).
+- The "native mode inside kro" (expand-on-hub, one control loop) is **future
+  work**; so is MCS-API for cross-cluster networking. Every proposed-vs-built
+  difference is tracked honestly in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
+- The scheduler, inventory agent and gateway in `cmd/fleet-demo` are
+  **demo-only** scaffolding so the capacity story has something producing
+  properties and decisions; OCM, Karmada or Kueue replace them without touching
+  kro-fleet.
 
 ## Architecture (thin PoC)
 
@@ -65,14 +78,15 @@ capacity case, and needs the KEP v2 additions; see the design doc.)
                          HUB CLUSTER
    ┌───────────────────────────────────────────────────────────┐
    │  fleet placement controller (multicluster-runtime)         │
-   │   • watches a FleetGenAIService (placement: v1 selector;   │
-   │     v2 decisionRef is proposed, not built — see KEP-GAP)   │
-   │   • reads the ClusterProfile inventory                     │
-   │   • places the GenAIService onto matching members          │
-   │   • tracks applied manifests, GC on unplace/delete         │
-   │   • aggregates per-member status onto the hub object       │
+   │   • watches a FleetGenAIService: placement = clusterSelector│
+   │     or a consumed PlacementDecision (+ per-member replicas) │
+   │   • reads the ClusterProfile inventory + status.properties │
+   │   • places each member's copy; AppliedManifestRecord per   │
+   │     (instance, member); GC on unplace/delete, orphan ledger │
+   │   • Placed (fail-closed) + Ready (by replicas) on the hub   │
+   │  demo-only: inventory agent, scheduler, gateway (fleet-demo)│
    └───────────────┬───────────────┬───────────────┬───────────┘
-        credentials via ClusterProfile.status.accessProviders
+        credentials via ClusterProfile.status.accessProviders (exec plugins)
                    │               │               │
              ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
              │ member gke│   │ member aks│   │ member eks│
@@ -84,20 +98,32 @@ capacity case, and needs the KEP v2 additions; see the design doc.)
 ## Try it
 
 ```bash
-scripts/setup-fleet.sh 2                          # 1 hub + 2 member kind clusters
-go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub &
+scripts/setup-fleet.sh 3                          # 1 hub + 3 member kind clusters (gke/aks/eks personas, 4 fake GPUs each)
+go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub \
+  --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin &   # built by setup-fleet.sh
+go run ./cmd/fleet-demo all --hub-context kind-kro-fleet-hub \
+  --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin &   # demo-only: inventory agent + scheduler
+
+# replication: one selector, every matching member gets the whole graph
 kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.yaml
-kubectl --context kind-kro-fleet-hub get fgs demo-llm -n fleet-demo -o yaml   # status.clusters[]
-scripts/e2e.sh                                    # assert all six success criteria
+# division: 8 replicas no member can hold alone, split by a PlacementDecision
+kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-divided.yaml
+kubectl --context kind-kro-fleet-hub get fgs,placementdecisions,appliedmanifestrecords -n fleet-demo
+scripts/e2e.sh                                    # assert all twelve criteria (CI runs this)
 scripts/teardown-fleet.sh
 ```
+
+The KubeCon EU 2027 demo on real clouds — `scripts/provision.sh`,
+`scripts/demo.sh`, `scripts/reset.sh`, `scripts/teardown.sh` — is in
+[`docs/demo-cloud.md`](docs/demo-cloud.md).
 
 To *see* the fleet — one object across the members, its object graph, pod
 logs — build the [Headlamp plugin](headlamp-plugin/README.md).
 
-See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough, and
-[`docs/phase0-validation.md`](docs/phase0-validation.md) for the pinned
-versions and provider findings this is built on.
+See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the guided walkthrough,
+[`docs/rebaseline-2026-10.md`](docs/rebaseline-2026-10.md) for the pinned
+versions, and [`docs/phase0-validation.md`](docs/phase0-validation.md) for the
+original provider findings this is built on.
 
 ## Related
 
@@ -105,6 +131,10 @@ versions and provider findings this is built on.
 - **The design doc (start here):** [`docs/design/fleet-scoped-kro.md`](docs/design/fleet-scoped-kro.md)
 - **The KEP (v2):** [`docs/proposals/KEP-kro-multicluster.md`](docs/proposals/KEP-kro-multicluster.md)
 - **The honest ledger (proposed vs built):** [`docs/KEP-GAP.md`](docs/KEP-GAP.md)
+- **What the PoC consumes from KEP-5313, and the two gaps for SIG-Multicluster:** [`docs/placement-decision-gaps.md`](docs/placement-decision-gaps.md)
+- **Cluster properties the demo uses:** [`docs/properties.md`](docs/properties.md)
+- **The cloud demo (EKS + GKE + AKS):** [`docs/demo-cloud.md`](docs/demo-cloud.md)
+- **October 2026 re-baseline (versions, what broke, Work API evaluation):** [`docs/rebaseline-2026-10.md`](docs/rebaseline-2026-10.md)
 - **The MVP demo plan (3 clusters + Headlamp plugin + recording):** [`docs/proposals/kro-fleet-mvp-plan.md`](docs/proposals/kro-fleet-mvp-plan.md)
 - **Fleet-scale operating model (inspiration):** https://lucy.sh/fleet-scale-kubernetes
 

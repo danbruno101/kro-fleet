@@ -1,0 +1,30 @@
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: cloud.example.com}
+spec: {value: aks}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: region.example.com}
+spec: {value: eastus}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: accelerator.example.com}
+spec: {value: gpu}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: cost-tier.example.com}
+spec: {value: "3"}
+---
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: capacity-type.example.com}
+spec: {value: spot}
+---
+# The one accredited member: the compliance beat's hard requirement.
+apiVersion: about.k8s.io/v1beta1
+kind: ClusterProperty
+metadata: {name: compliance.example.com}
+spec: {value: fedramp-high}

@@ -1,5 +1,11 @@
 # Demo script — one object, three clusters, one view
 
+> This is the **Headlamp recording** walkthrough (replicated placement on the
+> kind fleet). The KubeCon EU 2027 **cloud demo** — capacity across EKS, GKE
+> and AKS — is `scripts/demo.sh`, documented in [`demo-cloud.md`](demo-cloud.md).
+> Since October 2026 the fleet RGD expands a **StatefulSet** (not a Deployment)
+> and the members carry three personas; the clicks below still apply.
+
 The click-by-click walkthrough for recording the kro-fleet MVP demo, validated
 live against the exact setup below. The narration follows the **audience
 narrative** of [`proposals/kro-fleet-mvp-plan.md`](proposals/kro-fleet-mvp-plan.md) §2:
@@ -98,7 +104,7 @@ kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.
 
 **Switch to the browser** (KRO Fleet view, it updates live):
 
-- The `demo-llm` row appears; *Placed / Ready* climbs `3/0 → 3/3`; the three
+- The `demo-llm` row appears; *Clusters (placed / ready)* climbs `3 / 0 → 3 / 3`; the three
   member chips flip green (~60–90 s; talk over it).
 
 > "The platform takes it from here. Placed on three clusters… and one by one

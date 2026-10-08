@@ -103,9 +103,30 @@ spec:
 
 The template stays **cloud- and cluster-agnostic**. Placement is a field.
 
-<small>Selector shown = the PoC (KEP v1 scope). KEP **v2** adds a second
-source: `placement.decisionRef` — a decision computed by a scheduler, policy
-engine, or failover controller that KRO consumes. Proposed, not built.</small>
+<small>Selector = replication. The second source, `placement.decisionRef`,
+consumes a KEP-5313 `PlacementDecision` written by a scheduler, policy engine
+or failover controller — and carries per-member replicas: **division**.</small>
+
+---
+
+## Capacity across clouds (the KubeCon EU 2027 demo)
+
+```yaml
+spec:
+  placement:
+    decisionRef: { name: demo-llm }          # a standard PlacementDecision
+    requirements: { matchProperties: { accelerator.example.com: gpu } }
+  template:
+    spec: { name: demo-llm, mode: gpu, replicas: 8 }   # the developer's spec, unchanged
+```
+
+- no single cluster has 8 free GPUs → the decision says **4 + 2 + 2**
+- each cloud expands its slice with stock kro; storage class, load balancer,
+  identity resolved per cloud by the platform; **one Ready** = 8/8 replicas
+- `Placed=False` is explicit: `DecisionPending`, `NoEligibleClusters`,
+  `InsufficientCapacity` (never spills), `DecisionViolatesRequirements`
+- `kubectl delete fgs demo-llm` → every cloud cleaned, by the per-member
+  inventory (`AppliedManifestRecord`)
 
 ---
 
@@ -127,7 +148,7 @@ One `kubectl get` answers "is my fleet converged?"
 
 ---
 
-## What CI proves (all six, on kind, hermetic)
+## What CI proves (all twelve, on kind, hermetic)
 
 1. one hub object → workload **Ready on every matching member**
 2. mutate the hub object → **all members converge**
@@ -135,6 +156,12 @@ One `kubectl get` answers "is my fleet converged?"
 4. unmatch a member → workload removed there, **no orphans**
 5. delete the hub object → **fleet-wide GC**
 6. `status.clusters[]` + rolled-up condition **correct** (tolerance honored)
+7. per-member **inventory**: prune, orphan surfaced then settled
+8. a **PlacementDecision** consumed: division, refusal, partial, empty, pending
+9. **capacity**: 8 replicas divided 3/3/2, then `cheapest-first` → 4/4/0
+10. **compliance**: only the accredited cloud, shortfall reported, no spill
+11. **drain**: replicas move, readiness recovers, record gone
+12. **one URL** answered from several clouds (cloud-provider-kind)
 
 Plus the portability beat: the *same* hub object binds
 `premium-rwo` on the gke sim and `managed-csi` on the aks sim.
@@ -146,13 +173,14 @@ Plus the portability beat: the *same* hub object binds
 | KEP (native ideal) | This PoC |
 |---|---|
 | expansion on the hub, inside kro | stock kro expands **on each member** |
-| `status.accessProviders` credential plugins | labeled kubeconfig **Secret** strategy |
-| cluster manager maintains health | health **asserted at registration** |
-| dedicated applied-manifest inventory | `status.clusters[]` doubles as inventory |
-| fleet scale | 3 kind clusters on a laptop |
-| v2: `decisionRef` (external decision producers) | selector only |
-| v2: per-member parameters (division) | replication only |
-| v2: terminal refusal on empty placement + provenance | not distinguished / not recorded |
+| `status.accessProviders` credential plugins | **as proposed**: exec plugins (kind: secret reader; clouds: aws / gke / kubelogin) |
+| cluster manager maintains health + properties | health **asserted at registration**; properties mirrored by a **demo agent** |
+| dedicated applied-manifest inventory | **built**: `AppliedManifestRecord` per (instance, member) |
+| fleet scale | 3 kind clusters on a laptop; 3 real clouds for the demo |
+| v2: `decisionRef` (external decision producers) | **built** on KEP-5313; the producer is a **demo-only** scheduler |
+| v2: per-member parameters (division) | **built**, carried by an annotation convention (gap written up for the SIG) |
+| v2: terminal refusal on empty placement + provenance | **built**: `Placed` reasons + `status.placement` |
+| cross-cluster networking | out of scope: per-cloud LBs + a demo gateway; **MCS-API is future work** |
 
 Selected rows — the full ledger is `docs/KEP-GAP.md`, and every divergence is
 documented there.
@@ -179,10 +207,11 @@ documented there.
 ## Try it
 
 ```bash
-scripts/setup-fleet.sh 2
-go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub
-kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.yaml
-scripts/e2e.sh        # the six criteria, asserted
+scripts/setup-fleet.sh 3
+go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin
+go run ./cmd/fleet-demo all     --hub-context kind-kro-fleet-hub --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin
+kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-divided.yaml
+scripts/e2e.sh        # the twelve criteria, asserted
 ```
 
 **github.com/danbruno101/kro-fleet** — KEP draft in `docs/proposals/`
