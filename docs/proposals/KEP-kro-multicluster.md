@@ -2,15 +2,32 @@
 
 | | |
 |---|---|
-| **Status** | Provisional / Draft (for discussion) — **v2** |
+| **Status** | Provisional / Draft (for discussion) — **v2.1** |
 | **Owning group** | SIG-Multicluster + KRO maintainers (`kubernetes-sigs/kro`) |
 | **Stakeholders** | SIG Cloud Provider (cross-cloud portability), SIG Apps |
 | **Authors** | @danbruno101 (+ TBD) |
-| **Created** | 2026-07-02 · **revised** 2026-08-27 |
-| **Depends on** | KEP-4322 Cluster Inventory / ClusterProfile · `sigs.k8s.io/multicluster-runtime` |
+| **Created** | 2026-07-02 · **revised** 2026-08-27 (v2) · 2026-10-08 (v2.1) |
+| **Depends on** | KEP-4322 Cluster Inventory / ClusterProfile · KEP-5313 PlacementDecision · KEP-2149 About API / ClusterProperty · `sigs.k8s.io/multicluster-runtime` |
 | **Companion** | `docs/design/fleet-scoped-kro.md` — problem framing, requirements and open questions for SIG-Multicluster |
 
 ---
+
+## What changed in v2.1
+
+v2 reserved `placement.decisionRef` for "a decision computed by someone
+else" and left the decision object unspecified, as the open question for
+SIG-Multicluster. SIG-Multicluster has since standardized it: **KEP-5313
+`PlacementDecision`** (`multicluster.x-k8s.io`, implemented in
+`cluster-inventory-api`). v2.1 binds `decisionRef` to that object, adds
+`placementKey` (its recommended label-based discovery), binds cluster
+properties to **KEP-2149 `ClusterProperty`** mirrored into
+`ClusterProfile.status.properties` (KEP-4322), and states the two things the
+standard does not carry that this KEP needs — per-member parameters and a
+decision-level refusal reason — as explicit conventions with an upstream ask
+(`docs/placement-decision-gaps.md`). It also adds `placement.requirements`
+(hard constraints kro enforces fail-closed), replica-based readiness for
+divided placements, and the `Placed` condition's reasons. The reference PoC
+implements all of it; `docs/KEP-GAP.md` is the ledger.
 
 ## What changed in v2
 
@@ -112,7 +129,7 @@ is called out explicitly so the choice is deliberate.
 ### Goals
 - An **opt-in** `placement` concept on an RGD/instance that selects member clusters
   from a `ClusterProfile` inventory, **either** by label selector **or** by
-  reference to a decision computed elsewhere.
+  reference to a KEP-5313 `PlacementDecision` computed elsewhere.
 - Placement is an **input KRO consumes**, never something KRO computes. Serving
   capacity, compliance and failover is achieved by being drivable, not by
   absorbing those responsibilities.
@@ -187,13 +204,21 @@ spec:
     # (b) v2: a decision computed by someone else — a scheduler, a policy
     #     engine, a failover controller. KRO does not care which; it converges
     #     on whatever the decision says, and re-converges when it changes.
-    # decisionRef:
-    #   apiVersion: <group>/<version>   # e.g. a future portable decision API,
-    #   kind: <Kind>                    # OCM PlacementDecision, or a local CRD
-    #   name: sentiment-api-placement
+    #     v2.1: the decision is a KEP-5313 PlacementDecision in the same
+    #     namespace, by name or by placement-key label (slices merged in
+    #     decision-index order).
+    # decisionRef: { name: sentiment-api }
+    # placementKey: sentiment-api
     #
-    # Optional: how KRO treats partial failure for the rolled-up status.
-    tolerance: { minReadyClusters: 1 }
+    # v2.1: hard constraints over ClusterProfile.status.properties. Input to
+    # the producer, and a guard here: a decision naming a cluster that
+    # violates them is refused as a whole. KRO never selects with them.
+    # requirements:
+    #   matchProperties: { compliance.example.com: fedramp-high }
+    #
+    # Optional: how KRO treats partial readiness for the rolled-up status
+    # (clusters when replicated, replicas when divided).
+    tolerance: { minReadyClusters: 1 }    # or minReadyReplicas: 6
   schema: { ... }              # unchanged (the GenAIService developer API)
   resources:
     - id: deployment
@@ -209,35 +234,63 @@ spec:
       template: { ... }
 ```
 
-The decision object itself is deliberately *not* specified here — that is the
-open question this KEP puts to SIG-Multicluster (see the companion design doc).
-Whatever shape it takes, KRO needs only two things from it: an ordered set of
-member identities that resolve to `ClusterProfile`s, and an optional per-member
-parameter map. Shape sketch:
+The decision object is the SIG-Multicluster standard, KEP-5313
+`PlacementDecision`: a namespaced, data-only list of `clusterProfileRef`s
+with a per-cluster `reason` and a `schedulerName`, read-only for consumers.
+KRO needs two more things from it that the standard does not carry — a
+per-member parameter map, and a decision-level reason so an empty decision
+reads as a refusal rather than latency. v2.1 carries both as producer-set
+annotations and puts the ask to SIG-Multicluster
+(`docs/placement-decision-gaps.md`):
 
 ```yaml
-# illustrative only — the point is the shape KRO consumes, not the API
-clusters:
-  - name: gke-prod-1          # -> ClusterProfile
-    parameters: { replicas: 3 }
-  - name: eks-prod-2
-    parameters: { replicas: 5 }
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: PlacementDecision
+metadata:
+  name: sentiment-api
+  annotations:
+    parameters.fleet.kro.run/gke-prod-1: '{"replicas":"3"}'   # convention
+    parameters.fleet.kro.run/eks-prod-2: '{"replicas":"5"}'
+    fleet.kro.run/decision-reason: "8 requested; split by free GPUs"  # convention
+schedulerName: some-scheduler
+decisions:
+  - clusterProfileRef: { namespace: fleet-system, name: gke-prod-1 }
+    reason: "3 free GPUs"
+  - clusterProfileRef: { namespace: fleet-system, name: eks-prod-2 }
+    reason: "5 free GPUs"
 ```
 
 Per-instance status gains a fleet view:
 
 ```yaml
 status:
+  placement:               # provenance: the decision as consumed
+    source: PlacementDecision
+    decisionNames: [sentiment-api]
+    schedulerName: some-scheduler
+    reason: "8 requested; split by free GPUs"
+    clusters:
+      - { name: gke-prod-1, reason: "3 free GPUs", parameters: { replicas: "3" } }
+      - { name: eks-prod-2, reason: "5 free GPUs", parameters: { replicas: "5" } }
   clusters:
     - name: gke-prod-1     # ClusterProfile name
       ready: true
-      conditions: [ ... ]  # reflected from the member
-    - name: aks-prod-1
+      assignedReplicas: 3
+      readyReplicas: 3
+      endpoint: 34.1.2.3   # the member's own load balancer, when it reports one
+    - name: eks-prod-2
       ready: true
+      assignedReplicas: 5
+      readyReplicas: 5
   summary:
-    placed: 3
-    ready: 3
+    placed: 2
+    ready: 2
+    requestedReplicas: 8
+    assignedReplicas: 8
+    readyReplicas: 8
   conditions:
+    - type: Placed
+      status: "True"       # or False/{DecisionPending,NoEligibleClusters,InsufficientCapacity,DecisionViolatesRequirements}
     - type: Ready
       status: "True"       # per spec.placement.tolerance
 ```
@@ -264,10 +317,13 @@ status:
              └───────────┘   └───────────┘   └───────────┘
 ```
 
-- **Inventory + credentials:** each member is represented by a `ClusterProfile`
-  (`multicluster.x-k8s.io`). KRO uses `status.accessProviders` (KEP-4322/5339) to
-  obtain member credentials via the standardized plugin mechanism — KRO does not
-  invent a kubeconfig store.
+- **Inventory + credentials + properties:** each member is represented by a
+  `ClusterProfile` (`multicluster.x-k8s.io`). KRO uses `status.accessProviders`
+  (KEP-4322/5339) to obtain member credentials via the standardized plugin
+  mechanism — KRO does not invent a kubeconfig store — and reads
+  `status.properties` (KEP-4322), which a cluster manager mirrors from the
+  member's About API `ClusterProperty` objects (KEP-2149), only to enforce
+  `placement.requirements`. Producers read the same properties to decide.
 - **Reconciliation:** KRO's per-RGD controller is built on **multicluster-runtime**,
   which starts/stops reconciliation against clusters discovered through a provider
   (a ClusterProfile provider). The existing single-cluster DAG/CEL/server-side-apply
@@ -301,7 +357,16 @@ no cluster matches the selector, or the referenced decision is empty because a
 policy engine refused — the instance must reach a **terminal, explicit** state
 (`Placed=False` with a machine-readable reason) rather than sitting Pending or,
 worse, falling back to some broader set. There is no such thing as a graceful
-fallback for a compliance constraint.
+fallback for a compliance constraint. The `Placed` condition distinguishes:
+`DecisionPending` (the decision does not exist yet — the producer has not
+decided), `NoEligibleClusters` (it exists and is empty: terminal, carrying the
+producer's reason), `InsufficientCapacity` (it assigns fewer replicas than
+requested: the decided slice is placed, nothing spills elsewhere, the
+shortfall is reported), and `DecisionViolatesRequirements` (it names a cluster
+outside the fleet or failing `placement.requirements`: refused as a whole,
+nothing placed). Because KEP-5313 has no decision-level reason, "absent =
+pending, empty = refusal" is a convention this KEP adopts and asks the SIG to
+bless or replace.
 
 KRO also records the resolved decision in status — which members were chosen and,
 where the decision supplies it, the justification — so that a regulated user can
@@ -319,9 +384,14 @@ Two constraints worth stating: parameters must not be able to alter the *shape*
 of the graph (only values), or per-member graphs diverge and status aggregation
 stops being meaningful; and the applied-manifest inventory must be keyed per
 `(instance, member)` by GVK/name, not derived from an assumed-identical graph.
-The PoC currently takes the shortcut of letting `status.clusters[]` double as the
-inventory, which is only valid while every member receives exactly one identical
-object — see `docs/KEP-GAP.md`.
+The PoC implements that inventory as one `AppliedManifestRecord` per
+`(instance, member)` — see `docs/KEP-GAP.md`.
+
+When the placement is *divided* (per-member replicas), readiness is judged by
+replicas: `Ready` iff the ready replicas summed across members reach
+`tolerance.minReadyReplicas` (default: the requested total), with per-member
+assigned/ready counts in `status.clusters[]`. A replicated placement keeps the
+cluster-count semantics (`minReadyClusters`). Nothing placed is never `Ready`.
 
 ### Placement & rescheduling
 v1: static label-selector placement, re-evaluated on ClusterProfile inventory
@@ -369,11 +439,11 @@ deliberately trivial decision producer** — none of which is part of KRO. If KR
 converges correctly on all three without knowing which produced the decision,
 the "drivable, not a scheduler" thesis is demonstrated rather than asserted.
 
-| Scenario | Producer (~100 LOC, outside KRO) | Assertion |
+| Scenario | Producer (outside KRO; the PoC's `fleet-demo scheduler`) | Assertion (PoC e2e criterion) |
 |---|---|---|
-| **Capacity** | Reads member allocatable, emits per-member `replicas` summing to the requested total | Members receive *different* replica counts; the sum matches; rebalancing on capacity change converges |
-| **Compliance** | Filters candidates to those with a compliance property; emits an empty decision when none qualify | Placement occurs **only** on qualifying members; an empty decision yields terminal `Placed=False` with a reason and **no** fallback placement; the decision is recorded in status |
-| **Failover** | Watches ClusterProfile `ControlPlaneHealthy`; rewrites the decision when a member goes unhealthy | Workload is unplaced from the failed member and placed on a standby; teardown of the failed member is retried and does not orphan when it returns |
+| **Capacity** | Reads free accelerators from `ClusterProfile.status.properties`, emits per-member `replicas` summing to the requested total (`spread`, or `cheapest-first` / `spot-first` / `bin-pack` for the efficiency framing) | Members receive *different* replica counts; the sum matches; readiness rolls up by replicas; a policy change re-converges (criterion 9) |
+| **Compliance** | Honors `placement.requirements`; places only on qualifying members; emits a partial decision with the shortfall reason, or an empty decision when none qualify | Placement occurs **only** on qualifying members; the shortfall is `Placed=False/InsufficientCapacity` with **no** spill; an empty decision yields terminal `Placed=False/NoEligibleClusters` with the reason; the decision is recorded in status (criteria 8, 10) |
+| **Failover** | Watches ClusterProfile health and a `draining` property; rewrites the decision when a member drains or goes unhealthy | Workload is unplaced from the drained member and placed on the others; an unhealthy member blocks its own cleanup until it returns and never orphans silently (criteria 7, 11) |
 
 Each producer should be replaceable by a real implementation (OCM Placement,
 Karmada, a policy engine) without changing KRO — that substitutability is the
@@ -411,13 +481,16 @@ reimplementing propagation, it has become Karmada and should be reconsidered.
 ## Graduation criteria (phased)
 - **Alpha:** multi-cluster mode behind a feature gate; label-selector placement;
   push model; kind e2e green; ClusterProfile + multicluster-runtime integration.
-- **Alpha+ (v2 scope):** `decisionRef` and per-member parameters; the three
-  reference decision producers (capacity / compliance / failover) with an e2e
-  scenario each; terminal `Placed=False` on an empty decision; resolved decision
-  recorded in status.
-- **Beta:** status aggregation hardened; finalizer/GC soak-tested; applied-manifest
-  inventory keyed per `(instance, member)`; policy scoping of targetable clusters;
-  docs + reference demo across ≥2 real clouds.
+- **Alpha+ (v2 scope — implemented in the reference PoC, Oct 2026):**
+  `decisionRef`/`placementKey` consuming KEP-5313, per-member parameters, the
+  reference decision producer covering capacity / compliance / failover with
+  an e2e scenario each; terminal `Placed=False` on an empty decision; resolved
+  decision recorded in status; `placement.requirements` enforced fail-closed.
+- **Beta:** status aggregation hardened (grace period, `Degraded`/`Unknown`);
+  finalizer/GC soak-tested; policy scoping of targetable clusters; the
+  per-member parameters and decision-level reason adopted upstream or
+  replaced by what SIG-Multicluster settles on; docs + reference demo across
+  ≥2 real clouds (the KubeCon EU 2027 demo spans EKS, GKE and AKS).
 - **GA:** aligned with ClusterProfile/accessProviders GA; scale targets published;
   optional pull-mode; alignment with whatever portable decision API (if any) SIG
   Multicluster settles on.
@@ -428,6 +501,12 @@ reimplementing propagation, it has become Karmada and should be reconsidered.
 - KEP-4322 Cluster Inventory / ClusterProfile —
   https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/4322-cluster-inventory
 - ClusterProfile API overview — https://multicluster.sigs.k8s.io/concepts/cluster-profile-api/
+- KEP-5313 PlacementDecision API —
+  https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/5313-placement-decision-api
+- KEP-2149 ClusterId / About API (`ClusterProperty`) —
+  https://github.com/kubernetes/enhancements/tree/master/keps/sig-multicluster/2149-clusterid
+- about-api — https://github.com/kubernetes-sigs/about-api
 - cluster-inventory-api — https://github.com/kubernetes-sigs/cluster-inventory-api
+- What the PoC consumes from KEP-5313 and the two gaps — `docs/placement-decision-gaps.md`
 - multicluster-runtime — https://github.com/kubernetes-sigs/multicluster-runtime
 - Fleet-scale operating model (inspiration) — https://lucy.sh/fleet-scale-kubernetes

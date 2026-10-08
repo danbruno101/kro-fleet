@@ -8,7 +8,7 @@ the member clusters**, in one Headlamp instance.
   every member — with streaming logs.
 - **Map source**: the cross-cluster object graph in Headlamp's resource-map
   view — hub `FleetGenAIService` → placed `GenAIService` per member → the
-  kro-expanded children (Deployment/Service/PVC) on that member.
+  kro-expanded children (StatefulSet/Service/PVC) on that member.
 
 Built with `@kinvolk/headlamp-plugin` **0.14.0** (pinned). API patterns follow
 the official Cluster API plugin (`registerMapSource`) and Kubeflow plugin
