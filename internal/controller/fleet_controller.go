@@ -234,14 +234,14 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		if matchedSet[member] {
 			continue
 		}
-		gone, err := r.unplace(ctx, fgs, rec, profileMap[member])
+		gone, pending, err := r.unplace(ctx, fgs, rec, profileMap[member])
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !gone {
 			blocked = true
 			statuses = append(statuses, fleetv1alpha1.ClusterStatus{
-				Name: member, Ready: false, Message: "pending removal: member not reachable",
+				Name: member, Ready: false, Message: "pending removal: " + pending,
 			})
 		} else {
 			log.Info("unplaced from member", "member", member)
@@ -345,13 +345,13 @@ func (r *FleetReconciler) finalize(ctx context.Context, fgs *fleetv1alpha1.Fleet
 
 	var remaining []fleetv1alpha1.ClusterStatus
 	for member, rec := range records {
-		gone, err := r.unplace(ctx, fgs, rec, profileMap[member])
+		gone, pending, err := r.unplace(ctx, fgs, rec, profileMap[member])
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !gone {
 			remaining = append(remaining, fleetv1alpha1.ClusterStatus{
-				Name: member, Ready: false, Message: "pending removal: member not reachable",
+				Name: member, Ready: false, Message: "pending removal: " + pending,
 			})
 		}
 	}
@@ -362,7 +362,9 @@ func (r *FleetReconciler) finalize(ctx context.Context, fgs *fleetv1alpha1.Fleet
 		if err := hub.Status().Update(ctx, fgs); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update status during finalize: %w", err)
 		}
-		log.Info("finalization blocked on unreachable members", "count", len(remaining))
+		for _, c := range remaining {
+			log.Info("finalization pending", "member", c.Name, "why", c.Message)
+		}
 		return ctrl.Result{RequeueAfter: notEngagedRetry}, nil
 	}
 
@@ -460,15 +462,18 @@ func (r *FleetReconciler) applyToMember(ctx context.Context, fgs *fleetv1alpha1.
 // record itself. Returns true when the placement is settled: all objects
 // confirmed gone and the record deleted, or the member deregistered (the
 // record is then kept, marked Orphaned, as the ledger of what may remain).
-// A member still registered but unreachable — not engaged, or reported
-// unhealthy by its cluster manager — blocks, to be retried.
-func (r *FleetReconciler) unplace(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, rec *fleetv1alpha1.AppliedManifestRecord, profile *clusterinventoryv1alpha1.ClusterProfile) (bool, error) {
+// Otherwise it returns false with why the removal is still pending, to be
+// retried: the member is registered but unreachable (not engaged, or
+// reported unhealthy by its cluster manager), or it is reachable and the
+// deleted objects are still terminating there (a cloud load balancer being
+// torn down, kro unwinding the graph).
+func (r *FleetReconciler) unplace(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, rec *fleetv1alpha1.AppliedManifestRecord, profile *clusterinventoryv1alpha1.ClusterProfile) (bool, string, error) {
 	log := ctrllog.FromContext(ctx)
 	hub := r.Manager.GetLocalManager().GetClient()
 	member := rec.Spec.Cluster.Name
 
 	if profile != nil && !MemberHealthy(profile) {
-		return false, nil // registered but reported unhealthy: nothing can be cleaned there yet
+		return false, "member reported unhealthy by its cluster manager", nil // nothing can be cleaned there yet
 	}
 	cl, err := r.Manager.GetCluster(ctx, r.clusterName(member))
 	if err != nil {
@@ -477,26 +482,30 @@ func (r *FleetReconciler) unplace(ctx context.Context, fgs *fleetv1alpha1.FleetG
 			// Keep the record as the orphan ledger and release the instance.
 			msg := fmt.Sprintf("member %s was deregistered before cleanup; %d tracked object(s) may be orphaned there", member, len(trackedManifests(rec)))
 			log.Info("member deregistered before cleanup; record kept as orphan ledger", "member", member)
-			return true, r.markOrphaned(ctx, rec, true, msg)
+			return true, "", r.markOrphaned(ctx, rec, true, msg)
 		}
-		return false, nil // registered but not engaged: retry later
+		return false, "member not engaged (credentials or connectivity)", nil // retry later
 	}
 	if err := r.markOrphaned(ctx, rec, false, ""); err != nil {
-		return false, err
+		return false, "", err
 	}
 
-	gone, err := deleteManifests(ctx, cl.GetClient(), fgs.Name, trackedManifests(rec))
+	tracked := trackedManifests(rec)
+	gone, err := deleteManifests(ctx, cl.GetClient(), fgs.Name, tracked)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	done, err := r.dropFromRecord(ctx, rec, gone)
-	if err != nil || !done {
-		return false, err
+	if err != nil {
+		return false, "", err
+	}
+	if !done {
+		return false, fmt.Sprintf("%d of %d tracked object(s) still terminating on the member", len(tracked)-len(gone), len(tracked)), nil
 	}
 	if err := hub.Delete(ctx, rec); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("failed to delete record for %s: %w", member, err)
+		return false, "", fmt.Errorf("failed to delete record for %s: %w", member, err)
 	}
-	return true, nil
+	return true, "", nil
 }
 
 // renderMemberObject builds the GenAIService to place from the template,
