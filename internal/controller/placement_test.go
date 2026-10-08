@@ -169,19 +169,3 @@ func TestRollupReady(t *testing.T) {
 		})
 	}
 }
-
-func TestMergeIntent(t *testing.T) {
-	existing := []fleetv1alpha1.ClusterStatus{
-		{Name: "member-2", Ready: true, Message: "instance state ACTIVE"},
-	}
-	got := mergeIntent(existing, map[string]bool{"member-1": true, "member-2": true, "member-3": true})
-
-	want := []fleetv1alpha1.ClusterStatus{
-		{Name: "member-1", Ready: false, Message: "placing"},
-		{Name: "member-2", Ready: true, Message: "instance state ACTIVE"}, // preserved, not reset
-		{Name: "member-3", Ready: false, Message: "placing"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %+v, want %+v", got, want)
-	}
-}

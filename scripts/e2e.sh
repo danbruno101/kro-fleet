@@ -9,6 +9,8 @@
 #   4. removing/unmatching a member     -> workload removed there, no orphans
 #   5. deleting the hub object          -> all placed objects on all members GC'd
 #   6. status.clusters[] reflects per-member readiness + correct rollup
+#   7. the per-member inventory (AppliedManifestRecord) tracks every placed
+#      object, prunes stale ones, and is settled on unplacement and deletion
 #
 # Usage: scripts/e2e.sh          (creates the fleet via setup-fleet.sh, runs the
 #                                 controller as a host process, asserts, cleans up)
@@ -74,6 +76,17 @@ wait_gone() {
 
 ready_count() { hub get fgs demo-llm -n "$WORKLOAD_NS" -o jsonpath='{.status.summary.ready}' 2>/dev/null; }
 is_ready()    { [ "$(ready_count)" = "$1" ]; }
+# record_applied <member>: the member's AppliedManifestRecord confirms the placed object (with its UID).
+record_applied() {
+  [ "$(hub get amr "demo-llm-$1" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Applied")].status}' 2>/dev/null)" = "True" ] &&
+  [ -n "$(hub get amr "demo-llm-$1" -n "$WORKLOAD_NS" -o jsonpath='{.status.applied[?(@.kind=="GenAIService")].uid}' 2>/dev/null)" ]
+}
+register_member2() {
+  local kc; kc="$(mktemp -t "${M2}-XXXX.kubeconfig")"
+  kind get kubeconfig --name "$M2" > "$kc"
+  fleet::register_member "$M2" aks "$kc" prod
+  rm -f "$kc"
+}
 
 cleanup() {
   [ -n "$CTRL_PID" ] && kill "$CTRL_PID" 2>/dev/null || true
@@ -101,16 +114,18 @@ hub apply -f "$REPO_ROOT/examples/fleetgenaiservice-sample.yaml"
 wait_for 420 "workload Ready on member-1 (real kro expansion)" is_ready 1
 member "$M1" get deploy demo-llm -n "$WORKLOAD_NS" >/dev/null || fail "kro did not expand a Deployment on member-1"
 
+echo "### criterion 7 (part 1): the inventory record for member-1 names the placed object"
+wait_for 60 "AppliedManifestRecord demo-llm-${M1} confirms the GenAIService with its UID" record_applied "$M1"
+[ "$(hub get amr "demo-llm-${M1}" -n "$WORKLOAD_NS" -o jsonpath='{.spec.manifests[0].kind}/{.spec.manifests[0].name}')" = "GenAIService/demo-llm" ] || fail "record intent does not name the GenAIService"
+
 echo "### criterion 6: status.clusters[] + rollup are correct (1 member)"
 [ "$(hub get fgs demo-llm -n "$WORKLOAD_NS" -o jsonpath='{.status.clusters[?(@.name=="'"$M1"'")].ready}')" = "true" ] || fail "status.clusters[] does not report $M1 ready"
 [ "$(hub get fgs demo-llm -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = "True" ] || fail "rolled-up Ready condition is not True (tolerance minReadyClusters=1)"
 
 echo "### criterion 3 (part 2): registering member-2's ClusterProfile lands the workload automatically"
-M2_KC="$(mktemp -t "${M2}-XXXX.kubeconfig")"
-kind get kubeconfig --name "$M2" > "$M2_KC"
-fleet::register_member "$M2" aks "$M2_KC" prod
-rm -f "$M2_KC"
+register_member2
 wait_for 300 "workload landed + Ready on freshly added member-2" is_ready 2
+wait_for 60 "AppliedManifestRecord demo-llm-${M2} confirms the GenAIService" record_applied "$M2"
 
 echo "### criterion 6: per-cloud expansion really differs (the portability claim)"
 [ "$(member "$M1" get pvc demo-llm-cache -n "$WORKLOAD_NS" -o jsonpath='{.spec.storageClassName}')" = "premium-rwo" ] || fail "member-1 (gke sim) did not resolve premium-rwo"
@@ -128,16 +143,30 @@ hub label clusterprofile "$M2" -n "$FLEET_NS" tier=dev --overwrite >/dev/null
 wait_gone 180 "GenAIService removed from member-2" member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS"
 wait_gone 180 "expanded graph GC'd on member-2 (Deployment gone)" member "$M2" get deploy demo-llm -n "$WORKLOAD_NS"
 wait_gone 180 "expanded graph GC'd on member-2 (PVC gone)" member "$M2" get pvc demo-llm-cache -n "$WORKLOAD_NS"
+wait_gone 60 "inventory record for member-2 deleted after unplacement" hub get amr "demo-llm-${M2}" -n "$WORKLOAD_NS"
 wait_for 120 "hub rollup back to 1/1 ready" is_ready 1
 hub label clusterprofile "$M2" -n "$FLEET_NS" tier=prod --overwrite >/dev/null
 wait_for 300 "re-matched member-2 landed again" is_ready 2
 
-echo "### criterion 5: delete the hub object -> fleet-wide GC"
+echo "### criterion 7 (part 2): the inventory prunes a tracked object that is no longer intended"
+# Simulate a leftover from an earlier, different placement: an object on
+# member-2 that carries our placed-by label and is recorded as applied, but
+# is not in the record's intent any more. The controller must delete exactly it.
+member "$M2" create configmap stray -n "$WORKLOAD_NS" --from-literal=left=over >/dev/null
+member "$M2" label configmap stray -n "$WORKLOAD_NS" "fleet.kro.run/placed-by=demo-llm" >/dev/null
+hub patch amr "demo-llm-${M2}" -n "$WORKLOAD_NS" --subresource=status --type=json \
+  -p '[{"op":"add","path":"/status/applied/-","value":{"version":"v1","kind":"ConfigMap","namespace":"'"$WORKLOAD_NS"'","name":"stray"}}]' >/dev/null
+wait_gone 120 "stale ConfigMap pruned from member-2 by the inventory" member "$M2" get configmap stray -n "$WORKLOAD_NS"
+wait_for 60 "record no longer lists the pruned object" sh -c "! hub get amr demo-llm-${M2} -n $WORKLOAD_NS -o jsonpath='{.status.applied[*].name}' | grep -q stray"
+member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS" >/dev/null || fail "pruning must not touch the intended object"
+
+echo "### criterion 5 + 7 (part 3): delete the hub object -> fleet-wide GC, records settled"
 hub delete fgs demo-llm -n "$WORKLOAD_NS" --timeout=120s >/dev/null
 for m in "$M1" "$M2"; do
   wait_gone 180 "GenAIService gone on $m" member "$m" get genaiservice demo-llm -n "$WORKLOAD_NS"
   wait_gone 180 "expanded graph gone on $m" member "$m" get deploy demo-llm -n "$WORKLOAD_NS"
+  wait_gone 60 "inventory record for $m deleted" hub get amr "demo-llm-${m}" -n "$WORKLOAD_NS"
 done
 
 echo
-echo "### e2e PASSED: all six success criteria hold"
+echo "### e2e PASSED: all seven success criteria hold"

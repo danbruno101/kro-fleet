@@ -50,11 +50,12 @@ import (
 
 const (
 	// Finalizer drives cross-cluster GC: the hub object is only released
-	// once every tracked member copy is deleted.
+	// once every tracked member copy is deleted (or its member is gone).
 	Finalizer = "fleet.kro.run/cleanup"
 	// FieldOwner is the server-side-apply field manager on members.
 	FieldOwner = "kro-fleet-placement"
-	// PlacedByLabel marks objects this controller applied to members.
+	// PlacedByLabel marks objects this controller applied to members; the
+	// inventory only ever deletes objects carrying it.
 	PlacedByLabel = "fleet.kro.run/placed-by"
 
 	// requeueInterval is the periodic resync: cheap belt-and-braces for
@@ -70,15 +71,16 @@ const (
 var GenAIServiceGVK = schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "GenAIService"}
 
 // FleetReconciler places one hub FleetGenAIService onto every member matching
-// its placement selector, tracks placements in status (the PoC's
-// applied-manifest inventory), GCs on unplacement/deletion via the finalizer,
-// and aggregates per-member readiness back onto the hub object.
+// its placement, keeps a per-(instance, member) AppliedManifestRecord as the
+// applied-manifest inventory, GCs on unplacement/deletion via the finalizer
+// using exactly that inventory, and aggregates per-member readiness back onto
+// the hub object.
 type FleetReconciler struct {
 	Manager        mcmanager.Manager
 	FleetNamespace string
 }
 
-// SetupWithManager wires the three watches:
+// SetupWithManager wires the watches:
 //   - FleetGenAIService on the hub (local cluster only — members never carry
 //     this CRD);
 //   - the placed GenAIService on every engaged member (provider clusters
@@ -179,44 +181,53 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		profileSet[profiles.Items[i].Name] = true
 	}
 
-	// Intent log first: persist the union of (about-to-be-placed ∪ already
-	// tracked) BEFORE touching members, so a crash between apply and
-	// status write can never orphan a copy the tracker doesn't know about.
-	tracked := trackedSet(fgs)
-	if intent := union(matchedSet, tracked); len(intent) != len(tracked) {
-		fgs.Status.Clusters = mergeIntent(fgs.Status.Clusters, intent)
-		if err := hub.Status().Update(ctx, fgs); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to record placement intent: %w", err)
-		}
-		tracked = intent
+	records, err := r.listRecords(ctx, fgs)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	blocked := false // a tracked member is unreachable, retry sooner
-
-	// Unplace members that stopped matching.
 	var statuses []fleetv1alpha1.ClusterStatus
-	for name := range tracked {
-		if matchedSet[name] {
+
+	// Unplace members that stopped matching: delete exactly what their
+	// record tracks, then the record.
+	for member, rec := range records {
+		if matchedSet[member] {
 			continue
 		}
-		gone, err := r.deleteFromMember(ctx, fgs, name, profileSet[name])
+		gone, err := r.unplace(ctx, fgs, rec, profileSet[member])
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !gone {
 			blocked = true
 			statuses = append(statuses, fleetv1alpha1.ClusterStatus{
-				Name: name, Ready: false, Message: "pending removal: member not reachable",
+				Name: member, Ready: false, Message: "pending removal: member not reachable",
 			})
 		} else {
-			log.Info("unplaced from member", "member", name)
+			log.Info("unplaced from member", "member", member)
 		}
 	}
 
 	// Place / converge on matching members and collect readiness.
+	desired, err := r.renderMemberObject(fgs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	intended := []fleetv1alpha1.ManifestIdentifier{identifierOf(desired)}
 	readyCount := 0
-	for _, name := range matched {
-		st := r.applyToMember(ctx, fgs, name)
+	for _, member := range matched {
+		// Intent log first: the record names what is about to be applied
+		// BEFORE the member is touched, so a crash between apply and the
+		// confirmation can never orphan a copy the inventory doesn't know.
+		rec, err := r.ensureRecord(ctx, fgs, records[member], member, intended)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		st, err := r.applyToMember(ctx, fgs, rec, member, desired.DeepCopy())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		if st.Ready {
 			readyCount++
 		}
@@ -240,10 +251,11 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
-// finalize deletes the placed copy from every tracked member, then releases
-// the finalizer. Members whose ClusterProfile no longer exists are skipped
-// (unreachable by definition — see docs/KEP-GAP.md); members still registered
-// but not engaged block deletion and retry.
+// finalize unplaces every recorded member, then releases the finalizer.
+// Members still registered but not engaged block deletion and retry; a
+// member whose ClusterProfile is gone cannot be cleaned, so its record is
+// kept and marked Orphaned (settled by RecordReconciler if the member
+// returns) while the instance is released.
 func (r *FleetReconciler) finalize(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 	hub := r.Manager.GetLocalManager().GetClient()
@@ -261,15 +273,20 @@ func (r *FleetReconciler) finalize(ctx context.Context, fgs *fleetv1alpha1.Fleet
 		profileSet[profiles.Items[i].Name] = true
 	}
 
+	records, err := r.listRecords(ctx, fgs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	var remaining []fleetv1alpha1.ClusterStatus
-	for name := range trackedSet(fgs) {
-		gone, err := r.deleteFromMember(ctx, fgs, name, profileSet[name])
+	for member, rec := range records {
+		gone, err := r.unplace(ctx, fgs, rec, profileSet[member])
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !gone {
 			remaining = append(remaining, fleetv1alpha1.ClusterStatus{
-				Name: name, Ready: false, Message: "pending removal: member not reachable",
+				Name: member, Ready: false, Message: "pending removal: member not reachable",
 			})
 		}
 	}
@@ -292,68 +309,102 @@ func (r *FleetReconciler) finalize(ctx context.Context, fgs *fleetv1alpha1.Fleet
 	return ctrl.Result{}, nil
 }
 
-// applyToMember SSAs the namespace + GenAIService into one member and returns
-// its status entry.
-func (r *FleetReconciler) applyToMember(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, name string) fleetv1alpha1.ClusterStatus {
+// applyToMember SSAs the namespace + the desired object into one member,
+// confirms it in the record, prunes anything the record tracks that is no
+// longer intended, and returns the member's status entry.
+func (r *FleetReconciler) applyToMember(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, rec *fleetv1alpha1.AppliedManifestRecord, member string, desired *unstructured.Unstructured) (fleetv1alpha1.ClusterStatus, error) {
 	log := ctrllog.FromContext(ctx)
-	cl, err := r.Manager.GetCluster(ctx, r.clusterName(name))
+	cl, err := r.Manager.GetCluster(ctx, r.clusterName(member))
 	if err != nil {
-		return fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: "member not engaged (unhealthy or missing credentials)"}
+		return fleetv1alpha1.ClusterStatus{Name: member, Ready: false, Message: "member not engaged (unhealthy or missing credentials)"}, nil
 	}
 
+	// The workload namespace is shared infrastructure on the member (other
+	// instances and the member's own ClusterPlatform live there), so it is
+	// ensured but deliberately not inventoried or deleted.
 	ns := &corev1.Namespace{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 		ObjectMeta: metav1.ObjectMeta{Name: fgs.Namespace},
 	}
 	if err := cl.GetClient().Patch(ctx, ns, client.Apply, client.ForceOwnership, client.FieldOwner(FieldOwner)); err != nil {
-		return fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: fmt.Sprintf("failed to ensure namespace: %v", err)}
+		return fleetv1alpha1.ClusterStatus{Name: member, Ready: false, Message: fmt.Sprintf("failed to ensure namespace: %v", err)}, nil
 	}
 
-	desired, err := r.renderMemberObject(fgs)
-	if err != nil {
-		return fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: fmt.Sprintf("invalid template: %v", err)}
-	}
 	if err := cl.GetClient().Patch(ctx, desired, client.Apply, client.ForceOwnership, client.FieldOwner(FieldOwner)); err != nil {
-		log.Error(err, "failed to apply GenAIService to member", "member", name)
-		return fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: fmt.Sprintf("apply failed: %v", err)}
+		log.Error(err, "failed to apply GenAIService to member", "member", member)
+		return fleetv1alpha1.ClusterStatus{Name: member, Ready: false, Message: fmt.Sprintf("apply failed: %v", err)}, nil
+	}
+	applied := fleetv1alpha1.AppliedManifest{ManifestIdentifier: identifierOf(desired), UID: desired.GetUID()}
+	if err := r.confirmApplied(ctx, rec, []fleetv1alpha1.AppliedManifest{applied}); err != nil {
+		return fleetv1alpha1.ClusterStatus{}, err
+	}
+
+	// Prune: anything confirmed earlier that is no longer intended.
+	var stale []fleetv1alpha1.AppliedManifest
+	intended := map[fleetv1alpha1.ManifestIdentifier]bool{}
+	for _, id := range rec.Spec.Manifests {
+		intended[id] = true
+	}
+	for _, a := range rec.Status.Applied {
+		if !intended[a.ManifestIdentifier] {
+			stale = append(stale, a)
+		}
+	}
+	if len(stale) > 0 {
+		gone, err := deleteManifests(ctx, cl.GetClient(), fgs.Name, stale)
+		if err != nil {
+			return fleetv1alpha1.ClusterStatus{}, err
+		}
+		if _, err := r.dropFromRecord(ctx, rec, gone); err != nil {
+			return fleetv1alpha1.ClusterStatus{}, err
+		}
+		log.Info("pruned stale objects from member", "member", member, "count", len(gone))
 	}
 
 	// Read back (cached) for readiness.
 	placed := &unstructured.Unstructured{}
 	placed.SetGroupVersionKind(GenAIServiceGVK)
-	if err := cl.GetClient().Get(ctx, client.ObjectKeyFromObject(fgs), placed); err != nil {
-		return fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: fmt.Sprintf("placed, readback failed: %v", err)}
+	if err := cl.GetClient().Get(ctx, client.ObjectKeyFromObject(desired), placed); err != nil {
+		return fleetv1alpha1.ClusterStatus{Name: member, Ready: false, Message: fmt.Sprintf("placed, readback failed: %v", err)}, nil
 	}
 	ready, msg := MemberReady(placed)
-	return fleetv1alpha1.ClusterStatus{Name: name, Ready: ready, Message: msg}
+	return fleetv1alpha1.ClusterStatus{Name: member, Ready: ready, Message: msg}, nil
 }
 
-// deleteFromMember removes the placed copy from one member. Returns true when
-// the copy is confirmed gone (deleted, already absent, or the member's
-// ClusterProfile no longer exists so nothing can — or need — be done).
-func (r *FleetReconciler) deleteFromMember(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, name string, profileExists bool) (bool, error) {
+// unplace removes everything a record tracks from its member and then the
+// record itself. Returns true when the placement is settled: all objects
+// confirmed gone and the record deleted, or the member deregistered (the
+// record is then kept, marked Orphaned, as the ledger of what may remain).
+func (r *FleetReconciler) unplace(ctx context.Context, fgs *fleetv1alpha1.FleetGenAIService, rec *fleetv1alpha1.AppliedManifestRecord, profileExists bool) (bool, error) {
 	log := ctrllog.FromContext(ctx)
-	cl, err := r.Manager.GetCluster(ctx, r.clusterName(name))
+	hub := r.Manager.GetLocalManager().GetClient()
+	member := rec.Spec.Cluster.Name
+
+	cl, err := r.Manager.GetCluster(ctx, r.clusterName(member))
 	if err != nil {
 		if !profileExists {
-			// The member left the inventory entirely; its copy is
-			// unreachable and treated as gone (ledgered PoC gap).
-			log.Info("member deregistered before cleanup; skipping", "member", name)
-			return true, nil
+			// The member left the inventory; nothing can be done from here.
+			// Keep the record as the orphan ledger and release the instance.
+			msg := fmt.Sprintf("member %s was deregistered before cleanup; %d tracked object(s) may be orphaned there", member, len(trackedManifests(rec)))
+			log.Info("member deregistered before cleanup; record kept as orphan ledger", "member", member)
+			return true, r.markOrphaned(ctx, rec, true, msg)
 		}
 		return false, nil // registered but not engaged: retry later
 	}
+	if err := r.markOrphaned(ctx, rec, false, ""); err != nil {
+		return false, err
+	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(GenAIServiceGVK)
-	obj.SetNamespace(fgs.Namespace)
-	obj.SetName(fgs.Name)
-	if err := cl.GetClient().Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-		if meta.IsNoMatchError(err) {
-			// CRD never installed on this member — nothing was placed.
-			return true, nil
-		}
-		return false, fmt.Errorf("failed to delete from member %s: %w", name, err)
+	gone, err := deleteManifests(ctx, cl.GetClient(), fgs.Name, trackedManifests(rec))
+	if err != nil {
+		return false, err
+	}
+	done, err := r.dropFromRecord(ctx, rec, gone)
+	if err != nil || !done {
+		return false, err
+	}
+	if err := hub.Delete(ctx, rec); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("failed to delete record for %s: %w", member, err)
 	}
 	return true, nil
 }
@@ -381,51 +432,10 @@ func (r *FleetReconciler) clusterName(profileName string) multicluster.ClusterNa
 	return multicluster.ClusterName(r.FleetNamespace + "/" + profileName)
 }
 
-func trackedSet(fgs *fleetv1alpha1.FleetGenAIService) map[string]bool {
-	s := map[string]bool{}
-	for _, c := range fgs.Status.Clusters {
-		s[c.Name] = true
-	}
-	return s
-}
-
 func toSet(names []string) map[string]bool {
 	s := map[string]bool{}
 	for _, n := range names {
 		s[n] = true
 	}
 	return s
-}
-
-func union(a, b map[string]bool) map[string]bool {
-	u := map[string]bool{}
-	for k := range a {
-		u[k] = true
-	}
-	for k := range b {
-		u[k] = true
-	}
-	return u
-}
-
-// mergeIntent extends the tracked cluster list with placeholder entries for
-// newly matched members, preserving existing entries.
-func mergeIntent(existing []fleetv1alpha1.ClusterStatus, intent map[string]bool) []fleetv1alpha1.ClusterStatus {
-	have := map[string]bool{}
-	out := append([]fleetv1alpha1.ClusterStatus{}, existing...)
-	for _, c := range existing {
-		have[c.Name] = true
-	}
-	var added []string
-	for name := range intent {
-		if !have[name] {
-			added = append(added, name)
-		}
-	}
-	sort.Strings(added)
-	for _, name := range added {
-		out = append(out, fleetv1alpha1.ClusterStatus{Name: name, Ready: false, Message: "placing"})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
 }

@@ -26,6 +26,8 @@ func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
 		&FleetGenAIService{},
 		&FleetGenAIServiceList{},
+		&AppliedManifestRecord{},
+		&AppliedManifestRecordList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

@@ -159,6 +159,12 @@ func run(hubKubeconfig, hubContext, fleetNamespace, accessProvidersFile, secretR
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed to set up fleet controller: %w", err)
 	}
+	// Orphaned inventory records (instance gone, member unreachable at the
+	// time) are settled separately, when their member is engaged again.
+	rr := &controller.RecordReconciler{FleetNamespace: fleetNamespace}
+	if err := rr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to set up record controller: %w", err)
+	}
 
 	return mgr.Start(ctx)
 }

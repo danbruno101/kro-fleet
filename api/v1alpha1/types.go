@@ -89,10 +89,10 @@ type FleetGenAIServiceStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Clusters holds one entry per member the object is (or was last)
-	// placed on. This doubles as the PoC's applied-manifest inventory:
-	// members listed here are exactly those the controller must clean up
-	// on unplacement or deletion (see docs/KEP-GAP.md).
+	// Clusters holds one readiness entry per member the object is placed on
+	// (plus members pending removal). It is a view, not the inventory: what
+	// was applied where is tracked per (instance, member) in
+	// AppliedManifestRecord objects, which drive unplacement and teardown.
 	// +optional
 	Clusters []ClusterStatus `json:"clusters,omitempty"`
 
