@@ -109,11 +109,36 @@ export default function FleetView() {
             { label: 'Name', getter: (fgs: any) => fgs.metadata.name },
             { label: 'Namespace', getter: (fgs: any) => fgs.metadata.namespace },
             {
-              label: 'Placed / Ready',
+              label: 'Clusters (placed / ready)',
               getter: (fgs: any) =>
                 `${fgs.jsonData?.status?.summary?.placed ?? 0} / ${
                   fgs.jsonData?.status?.summary?.ready ?? 0
                 }`,
+            },
+            {
+              // Divided placements: ready replicas summed across members vs the
+              // template's total. Empty for replicated ones.
+              label: 'Replicas (ready / requested)',
+              getter: (fgs: any) => {
+                const s = fgs.jsonData?.status?.summary || {};
+                return s.requestedReplicas ? `${s.readyReplicas ?? 0} / ${s.requestedReplicas}` : '';
+              },
+            },
+            {
+              // Placed is the consumed decision's verdict: Placed, or why not
+              // (DecisionPending / NoEligibleClusters / InsufficientCapacity /
+              // DecisionViolatesRequirements) — never silently "not ready".
+              label: 'Placed',
+              getter: (fgs: any) => {
+                const placed = (fgs.jsonData?.status?.conditions || []).find(
+                  (c: any) => c.type === 'Placed'
+                );
+                return (
+                  <span title={placed?.message || ''}>
+                    <ReadyLabel ready={placed?.status === 'True'} text={placed?.reason || 'Unknown'} />
+                  </span>
+                );
+              },
             },
             {
               label: 'Rolled-up',
@@ -121,16 +146,33 @@ export default function FleetView() {
                 const ready = (fgs.jsonData?.status?.conditions || []).find(
                   (c: any) => c.type === 'Ready'
                 );
-                return <ReadyLabel ready={ready?.status === 'True'} text={ready?.reason} />;
+                return (
+                  <span title={ready?.message || ''}>
+                    <ReadyLabel ready={ready?.status === 'True'} text={ready?.reason} />
+                  </span>
+                );
               },
             },
             {
+              label: 'Decision',
+              getter: (fgs: any) => {
+                const p = fgs.jsonData?.status?.placement;
+                if (!p) return '';
+                return `${p.source}${p.schedulerName ? ` by ${p.schedulerName}` : ''}`;
+              },
+            },
+            {
+              // One chip per member: the split (assigned/ready replicas) rides
+              // in the chip text when the placement is divided.
               label: 'Per member',
               getter: (fgs: any) => (
                 <>
                   {(fgs.jsonData?.status?.clusters || []).map((c: any) => (
                     <span key={c.name} style={{ marginRight: '0.5em' }} title={c.message || ''}>
-                      <ReadyLabel ready={!!c.ready} text={c.name} />
+                      <ReadyLabel
+                        ready={!!c.ready}
+                        text={c.assignedReplicas ? `${c.name} ${c.readyReplicas ?? 0}/${c.assignedReplicas}` : c.name}
+                      />
                     </span>
                   ))}
                 </>
@@ -138,7 +180,7 @@ export default function FleetView() {
             },
           ]}
           data={fleetServices || []}
-          emptyMessage="No FleetGenAIService on the hub yet — apply examples/fleetgenaiservice-sample.yaml."
+          emptyMessage="No FleetGenAIService on the hub yet — apply examples/fleetgenaiservice-sample.yaml (replicated) or examples/fleetgenaiservice-divided.yaml (divided by a PlacementDecision)."
         />
       </SectionBox>
 
