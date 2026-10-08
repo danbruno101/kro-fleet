@@ -137,33 +137,37 @@ func TestMemberReady(t *testing.T) {
 }
 
 func TestRollupReady(t *testing.T) {
-	tol := func(n int32) *fleetv1alpha1.Tolerance {
-		return &fleetv1alpha1.Tolerance{MinReadyClusters: ptr.To(n)}
+	tol := func(clusters, replicas *int32) *fleetv1alpha1.Tolerance {
+		return &fleetv1alpha1.Tolerance{MinReadyClusters: clusters, MinReadyReplicas: replicas}
 	}
+	placedTrue := metav1.Condition{Type: fleetv1alpha1.ConditionPlaced, Status: metav1.ConditionTrue, Reason: fleetv1alpha1.ReasonPlaced}
+	refused := metav1.Condition{Type: fleetv1alpha1.ConditionPlaced, Status: metav1.ConditionFalse, Reason: fleetv1alpha1.ReasonNoEligibleClusters, Message: "nothing qualifies"}
 
 	tests := []struct {
 		name   string
-		placed int
-		ready  int
-		tol    *fleetv1alpha1.Tolerance
+		in     RollupInput
 		status metav1.ConditionStatus
 		reason string
 	}{
-		{"all ready, no tolerance", 3, 3, nil, metav1.ConditionTrue, "MinReadyClustersMet"},
-		{"one lagging, no tolerance means all", 3, 2, nil, metav1.ConditionFalse, "MinReadyClustersNotMet"},
-		{"one lagging, tolerated", 3, 2, tol(2), metav1.ConditionTrue, "MinReadyClustersMet"},
-		{"below tolerance", 3, 1, tol(2), metav1.ConditionFalse, "MinReadyClustersNotMet"},
-		{"zero placed, no tolerance", 0, 0, nil, metav1.ConditionFalse, "NoMatchingClusters"},
-		{"zero placed but explicitly tolerated", 0, 0, tol(0), metav1.ConditionTrue, "MinReadyClustersMet"},
-		{"nil tolerance struct field", 2, 2, &fleetv1alpha1.Tolerance{}, metav1.ConditionTrue, "MinReadyClustersMet"},
+		{"replicated: all ready, no tolerance", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 3}, metav1.ConditionTrue, "MinReadyClustersMet"},
+		{"replicated: one lagging, no tolerance means all", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 2}, metav1.ConditionFalse, "MinReadyClustersNotMet"},
+		{"replicated: one lagging, tolerated", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 2, Tolerance: tol(ptr.To[int32](2), nil)}, metav1.ConditionTrue, "MinReadyClustersMet"},
+		{"replicated: below tolerance", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 1, Tolerance: tol(ptr.To[int32](2), nil)}, metav1.ConditionFalse, "MinReadyClustersNotMet"},
+		{"nothing placed is never ready", RollupInput{Placed: refused}, metav1.ConditionFalse, fleetv1alpha1.ReasonNotPlaced},
+		{"nothing placed, explicit zero tolerance is not a vacuous success", RollupInput{Placed: refused, Tolerance: tol(ptr.To[int32](0), nil)}, metav1.ConditionFalse, fleetv1alpha1.ReasonNotPlaced},
+		{"divided: all replicas ready", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 3, RequestedReplicas: 8, AssignedReplicas: 8, ReadyReplicas: 8, Divided: true}, metav1.ConditionTrue, "MinReadyReplicasMet"},
+		{"divided: short by one replica", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 2, RequestedReplicas: 8, AssignedReplicas: 8, ReadyReplicas: 7, Divided: true}, metav1.ConditionFalse, "MinReadyReplicasNotMet"},
+		{"divided: tolerated shortfall", RollupInput{Placed: placedTrue, PlacedClusters: 3, ReadyClusters: 2, RequestedReplicas: 8, AssignedReplicas: 8, ReadyReplicas: 6, Divided: true, Tolerance: tol(nil, ptr.To[int32](6))}, metav1.ConditionTrue, "MinReadyReplicasMet"},
+		{"replicated with explicit replica tolerance", RollupInput{Placed: placedTrue, PlacedClusters: 2, ReadyClusters: 2, RequestedReplicas: 4, ReadyReplicas: 3, Tolerance: tol(nil, ptr.To[int32](3))}, metav1.ConditionTrue, "MinReadyReplicasMet"},
+		{"divided: zero ready is never ready even with zero minimum", RollupInput{Placed: placedTrue, PlacedClusters: 1, RequestedReplicas: 2, Divided: true, Tolerance: tol(nil, ptr.To[int32](0))}, metav1.ConditionFalse, "MinReadyReplicasNotMet"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := RollupReady(tt.placed, tt.ready, tt.tol)
+			got := RollupReady(tt.in)
 			if got.Status != tt.status || got.Reason != tt.reason {
-				t.Errorf("got %s/%s, want %s/%s", got.Status, got.Reason, tt.status, tt.reason)
+				t.Errorf("got %s/%s (%s), want %s/%s", got.Status, got.Reason, got.Message, tt.status, tt.reason)
 			}
-			if got.Type != "Ready" {
+			if got.Type != fleetv1alpha1.ConditionReady {
 				t.Errorf("condition type = %q, want Ready", got.Type)
 			}
 		})

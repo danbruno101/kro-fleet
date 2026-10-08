@@ -109,16 +109,22 @@ func (r *RecordReconciler) Reconcile(ctx context.Context, req mcreconcile.Reques
 
 	// Orphan: the instance is gone. Clean the member when it is reachable.
 	member := rec.Spec.Cluster.Name
+	profile := &clusterinventoryv1alpha1.ClusterProfile{}
+	switch perr := hub.Get(ctx, types.NamespacedName{Namespace: r.FleetNamespace, Name: member}, profile); {
+	case apierrors.IsNotFound(perr):
+		msg := fmt.Sprintf("member %s was deregistered before cleanup; %d tracked object(s) may be orphaned there", member, len(trackedManifests(rec)))
+		log.Info("orphaned record: member deregistered", "member", member)
+		// Re-enqueued by the ClusterProfile watch when the member returns.
+		return ctrl.Result{}, r.inventory.markOrphaned(ctx, rec, true, msg)
+	case perr != nil:
+		return ctrl.Result{}, fmt.Errorf("failed to get ClusterProfile %s: %w", member, perr)
+	}
+	if !MemberHealthy(profile) {
+		log.Info("orphaned record: member registered but reported unhealthy, retrying", "member", member)
+		return ctrl.Result{RequeueAfter: notEngagedRetry}, nil
+	}
 	cl, err := r.Manager.GetCluster(ctx, multicluster.ClusterName(r.FleetNamespace+"/"+member))
 	if err != nil {
-		profile := &clusterinventoryv1alpha1.ClusterProfile{}
-		perr := hub.Get(ctx, types.NamespacedName{Namespace: r.FleetNamespace, Name: member}, profile)
-		if apierrors.IsNotFound(perr) {
-			msg := fmt.Sprintf("member %s was deregistered before cleanup; %d tracked object(s) may be orphaned there", member, len(trackedManifests(rec)))
-			log.Info("orphaned record: member deregistered", "member", member)
-			// Re-enqueued by the ClusterProfile watch when the member returns.
-			return ctrl.Result{}, r.inventory.markOrphaned(ctx, rec, true, msg)
-		}
 		log.Info("orphaned record: member registered but not engaged, retrying", "member", member)
 		return ctrl.Result{RequeueAfter: notEngagedRetry}, nil
 	}

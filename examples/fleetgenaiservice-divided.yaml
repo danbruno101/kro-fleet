@@ -1,0 +1,40 @@
+# The capacity case: one developer instance asking for 8 replicas, divided
+# across members by a PlacementDecision (KEP-5313) that something else — a
+# scheduler — produced. kro-fleet CONSUMES the decision: it places on exactly
+# the decided members with the per-member replicas the decision carries, and
+# it never computes a placement itself.
+#
+#   * placement.decisionRef names the decision (same namespace). Until it
+#     exists, status reports Placed=False/DecisionPending. If it exists and is
+#     empty, Placed=False/NoEligibleClusters — terminal, with the producer's
+#     reason, never a fallback to a broader set.
+#   * placement.requirements is a hard constraint: a decision naming a cluster
+#     whose ClusterProfile does not advertise accelerator.example.com=gpu is
+#     refused as a whole (Placed=False/DecisionViolatesRequirements).
+#   * The developer's template is unchanged: it still just says replicas: 8.
+#     Each member's copy gets its share (status.placement shows the split).
+#
+# See examples/placementdecision-sample.yaml for a hand-written decision, and
+# docs/placement-decision-gaps.md for the per-member parameters convention.
+apiVersion: fleet.kro.run/v1alpha1
+kind: FleetGenAIService
+metadata:
+  name: demo-llm
+  namespace: fleet-demo
+spec:
+  placement:
+    decisionRef:
+      name: demo-llm
+    requirements:
+      matchProperties:
+        accelerator.example.com: gpu
+    # Ready requires all 8 replicas by default; tolerate a short fleet with
+    # tolerance.minReadyReplicas.
+  template:
+    spec:
+      name: demo-llm
+      model: "Qwen/Qwen2.5-0.5B-Instruct"
+      mode: mock          # the platform decides what backs "gpu" per cluster
+      replicas: 8
+      cacheSize: 1Gi
+      monitoring: true

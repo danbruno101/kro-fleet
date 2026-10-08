@@ -1,0 +1,40 @@
+# A PlacementDecision (multicluster.x-k8s.io, KEP-5313) as a scheduler would
+# write it for examples/fleetgenaiservice-divided.yaml — hand-written here so
+# the consumer side can be exercised without any scheduler at all.
+#
+# The standard carries the "which clusters" answer. Two things it does not
+# carry are supplied by producer-set annotations, a convention this PoC
+# documents in docs/placement-decision-gaps.md rather than an extension of
+# the upstream API:
+#   * parameters.fleet.kro.run/<ClusterProfile name>: per-member parameters
+#     (a JSON object); today kro-fleet understands "replicas".
+#   * fleet.kro.run/decision-reason: the decision-level reason, so an empty
+#     or partial decision can say why.
+# clusterProfileRef.namespace is the fleet namespace (ClusterProfiles live in
+# fleet-system, decisions next to the instance in fleet-demo).
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: PlacementDecision
+metadata:
+  name: demo-llm
+  namespace: fleet-demo
+  labels:
+    multicluster.x-k8s.io/placement-key: demo-llm
+  annotations:
+    fleet.kro.run/decision-reason: "8 requested; no single cluster has 8 free; spread by free GPUs"
+    parameters.fleet.kro.run/kro-fleet-member-1: '{"replicas":"4"}'
+    parameters.fleet.kro.run/kro-fleet-member-2: '{"replicas":"2"}'
+    parameters.fleet.kro.run/kro-fleet-member-3: '{"replicas":"2"}'
+schedulerName: hand-written
+decisions:
+  - clusterProfileRef:
+      namespace: fleet-system
+      name: kro-fleet-member-1
+    reason: "4 free GPUs"
+  - clusterProfileRef:
+      namespace: fleet-system
+      name: kro-fleet-member-2
+    reason: "2 free GPUs"
+  - clusterProfileRef:
+      namespace: fleet-system
+      name: kro-fleet-member-3
+    reason: "2 free GPUs"

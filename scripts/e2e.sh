@@ -10,7 +10,13 @@
 #   5. deleting the hub object          -> all placed objects on all members GC'd
 #   6. status.clusters[] reflects per-member readiness + correct rollup
 #   7. the per-member inventory (AppliedManifestRecord) tracks every placed
-#      object, prunes stale ones, and is settled on unplacement and deletion
+#      object, prunes stale ones, and surfaces (then settles) orphans left on
+#      a member that was deregistered before cleanup
+#   8. a PlacementDecision (KEP-5313) is consumed as the placement input:
+#      per-member replicas divide the template, a violated hard requirement
+#      refuses the whole decision, a partial decision never spills, an empty
+#      decision is a terminal refusal with the producer's reason, and a
+#      missing decision is pending — all recorded in status.placement
 #
 # Usage: scripts/e2e.sh          (creates the fleet via setup-fleet.sh, runs the
 #                                 controller as a host process, asserts, cleans up)
@@ -160,13 +166,129 @@ wait_gone 120 "stale ConfigMap pruned from member-2 by the inventory" member "$M
 wait_for 60 "record no longer lists the pruned object" sh -c "! hub get amr demo-llm-${M2} -n $WORKLOAD_NS -o jsonpath='{.status.applied[*].name}' | grep -q stray"
 member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS" >/dev/null || fail "pruning must not touch the intended object"
 
-echo "### criterion 5 + 7 (part 3): delete the hub object -> fleet-wide GC, records settled"
-hub delete fgs demo-llm -n "$WORKLOAD_NS" --timeout=120s >/dev/null
-for m in "$M1" "$M2"; do
-  wait_gone 180 "GenAIService gone on $m" member "$m" get genaiservice demo-llm -n "$WORKLOAD_NS"
-  wait_gone 180 "expanded graph gone on $m" member "$m" get deploy demo-llm -n "$WORKLOAD_NS"
-  wait_gone 60 "inventory record for $m deleted" hub get amr "demo-llm-${m}" -n "$WORKLOAD_NS"
-done
+echo "### criterion 5 + 7 (part 3): delete the hub object -> fleet-wide GC; an unreachable member blocks, a deregistered one is surfaced as an orphan and settled when it returns"
+# Make member-2 unreachable first (its cluster manager reports the control
+# plane unhealthy -> the provider disengages it), so nothing can be cleaned
+# there. Deleting the ClusterProfile alone would leave a window in which the
+# controller still reaches the member and, correctly, cleans up.
+hub patch clusterprofile "$M2" -n "$FLEET_NS" --subresource=status --type=merge \
+  -p "{\"status\":{\"conditions\":[{\"type\":\"ControlPlaneHealthy\",\"status\":\"False\",\"reason\":\"E2E\",\"message\":\"simulated outage\",\"lastTransitionTime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}}" >/dev/null
+member2_message_has() {  # member2_message_has <substring>: the hub's view of member-2 says so
+  hub get fgs demo-llm -n "$WORKLOAD_NS" -o jsonpath="{.status.clusters[?(@.name=='$M2')].message}" 2>/dev/null | grep -q "$1"
+}
+wait_for 120 "member-2 reported as not engaged" member2_message_has "not engaged"
+hub delete fgs demo-llm -n "$WORKLOAD_NS" --wait=false >/dev/null
+wait_gone 180 "GenAIService gone on $M1" member "$M1" get genaiservice demo-llm -n "$WORKLOAD_NS"
+wait_gone 180 "expanded graph gone on $M1" member "$M1" get deploy demo-llm -n "$WORKLOAD_NS"
+wait_gone 60 "inventory record for $M1 deleted" hub get amr "demo-llm-${M1}" -n "$WORKLOAD_NS"
+wait_for 120 "finalization blocked on the registered-but-unreachable member-2" member2_message_has "pending removal"
+hub get fgs demo-llm -n "$WORKLOAD_NS" >/dev/null 2>&1 || fail "the hub object must not be released while a registered member is unreachable"
+# Now the member leaves the inventory entirely: the instance is released, the
+# record is kept as the orphan ledger, and member-2's copy is still there.
+hub delete clusterprofile "$M2" -n "$FLEET_NS" >/dev/null
+wait_gone 120 "hub object released once the unreachable member is deregistered" hub get fgs demo-llm -n "$WORKLOAD_NS"
+[ "$(hub get amr "demo-llm-${M2}" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Orphaned")].status}')" = "True" ] || fail "record for the deregistered member-2 is not marked Orphaned"
+member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS" >/dev/null || fail "member-2's copy should still exist: it is orphaned and surfaced by the record, not silently dropped"
+echo "    ok: orphan surfaced: record demo-llm-${M2} kept with Orphaned=True, copy still on member-2"
+register_member2
+wait_gone 180 "orphaned copy removed from member-2 once it registered again" member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS"
+wait_gone 180 "expanded graph gone on $M2" member "$M2" get deploy demo-llm -n "$WORKLOAD_NS"
+wait_gone 120 "orphan record settled (deleted)" hub get amr "demo-llm-${M2}" -n "$WORKLOAD_NS"
+
+echo "### criterion 8: PlacementDecision consumption — division, fail-closed, provenance"
+FGS2=split-llm
+placed_reason()  { hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].reason}' 2>/dev/null; }
+placed_message() { hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].message}' 2>/dev/null; }
+ready_reason()   { hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null; }
+placed_is()      { [ "$(placed_reason)" = "$1" ]; }
+ready_replicas() { [ "$(hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.summary.readyReplicas}' 2>/dev/null)" = "$1" ]; }
+deploy_replicas(){ [ "$(member "$1" get deploy "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)" = "$2" ]; }
+pd_patch() {  # pd_patch <json merge patch>
+  hub patch placementdecision "$FGS2" -n "$WORKLOAD_NS" --type=merge -p "$1" >/dev/null
+}
+add_property() {  # add_property <member> <name> <value>: self-asserted here; the inventory agent owns this in the demo
+  hub patch clusterprofile "$1" -n "$FLEET_NS" --subresource=status --type=merge \
+    -p "{\"status\":{\"properties\":[{\"name\":\"$2\",\"value\":\"$3\"}]}}" >/dev/null
+}
+
+cat <<EOF | hub apply -f - >/dev/null
+apiVersion: fleet.kro.run/v1alpha1
+kind: FleetGenAIService
+metadata:
+  name: ${FGS2}
+  namespace: ${WORKLOAD_NS}
+spec:
+  placement:
+    decisionRef:
+      name: ${FGS2}
+    requirements:
+      matchProperties:
+        accelerator.example.com: gpu
+  template:
+    spec:
+      name: ${FGS2}
+      model: "Qwen/Qwen2.5-0.5B-Instruct"
+      mode: mock
+      replicas: 3
+      cacheSize: 1Gi
+      monitoring: false
+EOF
+wait_for 60 "no decision yet -> Placed=False/DecisionPending" placed_is DecisionPending
+
+cat <<EOF | hub apply -f - >/dev/null
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: PlacementDecision
+metadata:
+  name: ${FGS2}
+  namespace: ${WORKLOAD_NS}
+  annotations:
+    fleet.kro.run/decision-reason: "3 requested; split by free capacity"
+    parameters.fleet.kro.run/${M1}: '{"replicas":"2"}'
+    parameters.fleet.kro.run/${M2}: '{"replicas":"1"}'
+schedulerName: e2e-hand-written
+decisions:
+  - clusterProfileRef: {namespace: ${FLEET_NS}, name: ${M1}}
+    reason: "2 free"
+  - clusterProfileRef: {namespace: ${FLEET_NS}, name: ${M2}}
+    reason: "1 free"
+EOF
+wait_for 60 "decided clusters lack the required property -> Placed=False/DecisionViolatesRequirements" placed_is DecisionViolatesRequirements
+member "$M1" get genaiservice "$FGS2" -n "$WORKLOAD_NS" >/dev/null 2>&1 && fail "fail closed: nothing may be placed while the decision violates a hard requirement"
+member "$M2" get genaiservice "$FGS2" -n "$WORKLOAD_NS" >/dev/null 2>&1 && fail "fail closed: nothing may be placed while the decision violates a hard requirement"
+echo "    ok: refused as a whole, nothing placed"
+
+add_property "$M1" accelerator.example.com gpu
+add_property "$M2" accelerator.example.com gpu
+wait_for 120 "requirement now satisfied -> Placed=True" placed_is Placed
+wait_for 180 "member-1 runs its share (replicas=2)" deploy_replicas "$M1" 2
+wait_for 180 "member-2 runs its share (replicas=1)" deploy_replicas "$M2" 1
+wait_for 300 "3/3 replicas ready across the fleet" ready_replicas 3
+[ "$(ready_reason)" = "MinReadyReplicasMet" ] || fail "Ready reason is $(ready_reason), want MinReadyReplicasMet"
+[ "$(hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.placement.source}/{.status.placement.schedulerName}/{.status.placement.reason}')" = "PlacementDecision/e2e-hand-written/3 requested; split by free capacity" ] || fail "status.placement provenance not recorded"
+[ "$(hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath="{.status.placement.clusters[?(@.name=='$M1')].parameters.replicas}")" = "2" ] || fail "per-member parameters not recorded in status.placement"
+[ "$(hub get amr "${FGS2}-${M1}" -n "$WORKLOAD_NS" -o jsonpath='{.status.applied[0].parameters.replicas}')" = "2" ] || fail "inventory record does not carry the member's parameters"
+echo "    ok: provenance + parameters recorded"
+
+echo "### criterion 8 (partial): the decision shrinks to one member with too few replicas -> placed only there, never spilled"
+pd_patch "{\"metadata\":{\"annotations\":{\"fleet.kro.run/decision-reason\":\"only 2 of 3 fit on the eligible cluster\",\"parameters.fleet.kro.run/${M2}\":null}},\"decisions\":[{\"clusterProfileRef\":{\"namespace\":\"${FLEET_NS}\",\"name\":\"${M1}\"},\"reason\":\"2 free\"}]}"
+wait_for 60 "Placed=False/InsufficientCapacity" placed_is InsufficientCapacity
+echo "$(placed_message)" | grep -q "2 of 3" || fail "InsufficientCapacity message does not name the shortfall: $(placed_message)"
+wait_gone 180 "member-2's share removed (not spilled, not kept)" member "$M2" get genaiservice "$FGS2" -n "$WORKLOAD_NS"
+deploy_replicas "$M1" 2 || fail "member-1's share must be untouched by the shrink"
+[ "$(ready_reason)" = "MinReadyReplicasNotMet" ] || fail "Ready must be False while 2/3 replicas are ready, got $(ready_reason)"
+
+echo "### criterion 8 (refusal): an empty decision is a terminal refusal with the producer's reason"
+pd_patch "{\"metadata\":{\"annotations\":{\"fleet.kro.run/decision-reason\":\"no cluster qualifies (e2e)\"}},\"decisions\":[]}"
+wait_for 60 "Placed=False/NoEligibleClusters" placed_is NoEligibleClusters
+echo "$(placed_message)" | grep -q "no cluster qualifies (e2e)" || fail "refusal does not carry the producer's reason: $(placed_message)"
+wait_gone 180 "member-1's share removed on refusal" member "$M1" get genaiservice "$FGS2" -n "$WORKLOAD_NS"
+[ "$(ready_reason)" = "NotPlaced" ] || fail "Ready must be False/NotPlaced after a refusal, got $(ready_reason)"
+[ "$(hub get fgs "$FGS2" -n "$WORKLOAD_NS" -o jsonpath='{.status.summary.placed}')" = "0" ] || fail "summary.placed must be 0 after a refusal"
+
+echo "### criterion 8 (pending): the decision disappears -> pending again, not a fallback"
+hub delete placementdecision "$FGS2" -n "$WORKLOAD_NS" >/dev/null
+wait_for 60 "Placed=False/DecisionPending" placed_is DecisionPending
+hub delete fgs "$FGS2" -n "$WORKLOAD_NS" --timeout=120s >/dev/null
 
 echo
-echo "### e2e PASSED: all seven success criteria hold"
+echo "### e2e PASSED: all eight success criteria hold"
