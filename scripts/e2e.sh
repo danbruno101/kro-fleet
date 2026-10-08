@@ -68,6 +68,9 @@ fail() {
   echo "!!! FAIL: $*" >&2
   echo "--- fleet controller log (tail) ---" >&2; tail -50 "$CTRL_LOG" >&2 || true
   echo "--- fleet-demo log (tail) ---" >&2; tail -40 "$DEMO_LOG" >&2 || true
+  if [ -n "${CPK_PID:-}" ]; then
+    echo "--- cloud-provider-kind log (errors, tail) ---" >&2; grep -E "^E|error|failed" "$CPK_LOG" | tail -20 >&2 || true
+  fi
   echo "--- hub FleetGenAIServices ---" >&2; hub get fgs -A -o yaml 2>/dev/null | tail -80 >&2 || true
   exit 1
 }
