@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterinventoryv1alpha1 "sigs.k8s.io/cluster-inventory-api/apis/v1alpha1"
 
@@ -256,9 +257,15 @@ func TestRollupDefinition(t *testing.T) {
 		}
 	})
 	t.Run("deletion guard", func(t *testing.T) {
-		_, _, del, _ := RollupDefinition(DefinitionRollup{Enabled: true, Blocked: []BlockedMember{{Name: "m1", Instances: 2}, {Name: "m2", Instances: 1}}, Removing: []string{"m3"}})
-		if del.Status != metav1.ConditionFalse || del.Reason != fleetv1alpha1.ReasonBlockedByInstances || !strings.Contains(del.Message, "m1 (2 instance(s)), m2 (1 instance(s))") {
-			t.Fatalf("blocked must win and name members with counts: %+v", del)
+		_, _, del, _ := RollupDefinition(DefinitionRollup{Enabled: true, Blocked: []BlockedMember{{Name: "m1", HubPlaced: 2}, {Name: "m2", HubPlaced: 1, MemberLocal: 2}, {Name: "m3", MemberLocal: 1}}, Removing: []string{"m4"}})
+		if del.Status != metav1.ConditionFalse || del.Reason != fleetv1alpha1.ReasonBlockedByInstances {
+			t.Fatalf("blocked must win: %+v", del)
+		}
+		// The message tells hub-placed instances (from records) apart from
+		// member-local ones (found on the member, in no record).
+		want := "m1 (2 hub-placed, 0 member-local instance(s)), m2 (1 hub-placed, 2 member-local instance(s)), m3 (0 hub-placed, 1 member-local instance(s))"
+		if !strings.Contains(del.Message, want) {
+			t.Fatalf("blocked message must name members with both counts:\n got %q\nwant %q", del.Message, want)
 		}
 		_, _, del, _ = RollupDefinition(DefinitionRollup{Enabled: true, Removing: []string{"m3"}})
 		if del.Status != metav1.ConditionTrue || del.Reason != fleetv1alpha1.ReasonRemoving {
@@ -313,5 +320,28 @@ func TestManifestsOfKindAndDefinitionKind(t *testing.T) {
 	}
 	if manifestsOfKind(rec, DefinitionKind(definition("x", "Other"))) != 0 {
 		t.Fatal("other kinds must not count")
+	}
+}
+
+func TestMemberLocalInstances(t *testing.T) {
+	inst := func(ns, name string) unstructured.Unstructured {
+		u := unstructured.Unstructured{}
+		u.SetGroupVersionKind(GenAIServiceGVK)
+		u.SetNamespace(ns)
+		u.SetName(name)
+		return u
+	}
+	found := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{inst("fleet-demo", "placed"), inst("fleet-demo", "local"), inst("other", "placed")}}
+	tracked := map[types.NamespacedName]bool{{Namespace: "fleet-demo", Name: "placed"}: true}
+	// Only the instances no record tracks are member-local; the same name
+	// in another namespace is a different instance.
+	if n := MemberLocalInstances(found, tracked); n != 2 {
+		t.Fatalf("expected 2 member-local instances, got %d", n)
+	}
+	if n := MemberLocalInstances(nil, tracked); n != 0 {
+		t.Fatalf("no list means no instances, got %d", n)
+	}
+	if n := MemberLocalInstances(&unstructured.UnstructuredList{}, nil); n != 0 {
+		t.Fatalf("an empty list means no instances, got %d", n)
 	}
 }

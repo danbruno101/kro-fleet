@@ -56,22 +56,23 @@ const (
 	// ConditionDeleting reports the deletion guard. True (Removing) while
 	// the definition is being removed from one or more members with nothing
 	// blocking; False (BlockedByInstances) when removal is refused on members
-	// that still host hub-placed instances of this kind — the message names
-	// the blocking members and their instance counts; False
-	// (NoRemovalPending) otherwise. On delete the finalizer holds the
+	// that still host instances of this kind — placed by the hub (its
+	// inventory records) or created directly on the member, which stock kro
+	// accepts and only the member itself can show — the message names the
+	// blocking members with both counts; False (NoRemovalPending) otherwise. On delete the finalizer holds the
 	// wrapper in Terminating until every member is released.
 	ConditionDeleting = "Deleting"
 
 	// Reasons on the conditions above.
-	ReasonDistributed         = "Distributed"
-	ReasonDistributing        = "Distributing"
+	ReasonDistributed          = "Distributed"
+	ReasonDistributing         = "Distributing"
 	ReasonDistributionDisabled = "DistributionDisabled"
-	ReasonNoMatchingMembers   = "NoMatchingMembers"
-	ReasonAccepted            = "Accepted"
-	ReasonNotAccepted         = "NotAccepted"
-	ReasonRemoving            = "Removing"
-	ReasonBlockedByInstances  = "BlockedByInstances"
-	ReasonNoRemovalPending    = "NoRemovalPending"
+	ReasonNoMatchingMembers    = "NoMatchingMembers"
+	ReasonAccepted             = "Accepted"
+	ReasonNotAccepted          = "NotAccepted"
+	ReasonRemoving             = "Removing"
+	ReasonBlockedByInstances   = "BlockedByInstances"
+	ReasonNoRemovalPending     = "NoRemovalPending"
 
 	// Reasons on status.members[] that are NOT the member's own: set when
 	// the member could not be observed at all, or when what it reports is

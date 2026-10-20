@@ -45,11 +45,15 @@
 #      reported with reason RGDNotReady, never silently dropped
 #  19. deletion guard: removing a definition (unplacement or delete) from a
 #      member that still hosts hub-placed instances of its kind is refused
-#      with Deleting=False naming the member and count, and proceeds on its
+#      with Deleting=False naming the member and counts, and proceeds on its
 #      own once the instances are gone
 #  20. version skew: a definition one member cannot accept is reported with
 #      that member's own reason, the others Active, Accepted=False on the hub,
 #      and an instance of that kind lands only on the accepting members
+#  21. the deletion guard sees the member's reality, not the hub's ledger: an
+#      instance created directly on a member (stock kro accepts it) blocks
+#      the definition's removal there as "member-local", and releases it
+#      once deleted
 #
 # Usage: scripts/e2e.sh          (creates the fleet via setup-fleet.sh, runs the
 #                                 controller + demo processes as host processes,
@@ -673,7 +677,7 @@ member "$M2" delete -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" --ignore-not
 echo "### criterion 19 (unplacement): deselecting member-2 while it hosts ${SKEW} is refused — Deleting=False/BlockedByInstances naming it — and proceeds once the instance is gone"
 hub patch frgd "$GEN" --type=merge -p '{"spec":{"distribution":{"memberSelector":{"matchProperties":{"capacity-type.example.com":"on-demand"}}}}}' >/dev/null   # member-2 (aks) is spot
 wait_for 60 "Deleting=False/BlockedByInstances" frgd_reason_is "$GEN" Deleting BlockedByInstances
-echo "$(frgd_cond "$GEN" Deleting message)" | grep -q "${M2} (1 instance(s))" || fail "the guard must name the blocking member and its instance count: $(frgd_cond "$GEN" Deleting message)"
+echo "$(frgd_cond "$GEN" Deleting message)" | grep -q "${M2} (1 hub-placed, 0 member-local instance(s))" || fail "the guard must name the blocking member and its instance count: $(frgd_cond "$GEN" Deleting message)"
 member "$M2" get rgd "$GEN" >/dev/null || fail "the definition must stay on member-2 while its instance exists"
 member "$M2" get genaiservice "$SKEW" -n "$WORKLOAD_NS" >/dev/null || fail "the instance on member-2 must be untouched"
 hub delete fgs "$SKEW" -n "$WORKLOAD_NS" --timeout=180s >/dev/null
@@ -694,7 +698,7 @@ wait_for 300 "${GATED} lands on member-2 as soon as the gate opens: 3/3, Placed=
 
 echo "### criterion 19 (delete): deleting the definition while instances exist on every member holds it in Terminating; it is released once they are gone"
 hub delete frgd "$GEN" --wait=false >/dev/null
-wait_for 60 "Deleting=False/BlockedByInstances naming all three members" bash -c "frgd_reason_is $GEN Deleting BlockedByInstances && frgd_cond $GEN Deleting message | grep -q '$M1 (1 instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M2 (1 instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M3 (1 instance(s))'"
+wait_for 60 "Deleting=False/BlockedByInstances naming all three members" bash -c "frgd_reason_is $GEN Deleting BlockedByInstances && frgd_cond $GEN Deleting message | grep -q '$M1 (1 hub-placed, 0 member-local instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M2 (1 hub-placed, 0 member-local instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M3 (1 hub-placed, 0 member-local instance(s))'"
 [ -n "$(hub get frgd "$GEN" -o jsonpath='{.metadata.deletionTimestamp}')" ] || fail "the wrapper must be Terminating (finalizer held)"
 for m in "$M1" "$M2" "$M3"; do
   [ "$(member_rgd_state "$m" "$GEN")" = "Active" ] || fail "the definition must stay Active on $m while its instance exists"
@@ -708,7 +712,41 @@ echo "### finally: restore the GenAIService definition (config/fleet-rgd/) -> di
 hub apply -f "$REPO_ROOT/config/fleet-rgd/genaiservice-fleet-rgd.yaml" >/dev/null
 wait_for 300 "restored: ${GEN} MEMBERS 3/3" frgd_members_is "$GEN" 3/3
 wait_for 60 "restored: ${GEN} Accepted on all three with the hub hash" all_accepted_at "$GEN" "$(frgd_hash "$GEN")" "$M1" "$M2" "$M3"
+
+echo "### criterion 21: the guard sees member-local instances — a GenAIService created directly on member-2 (never via the hub) blocks deleting the definition there, and releases it once removed"
+LOCAL=local-llm
+cat <<EOF | member "$M2" apply -f - >/dev/null
+apiVersion: kro.run/v1alpha1
+kind: GenAIService
+metadata:
+  name: ${LOCAL}
+  namespace: ${WORKLOAD_NS}
+spec:
+  name: ${LOCAL}
+  model: "Qwen/Qwen2.5-0.5B-Instruct"
+  mode: mock
+  replicas: 1
+  cacheSize: 1Gi
+  monitoring: false
+EOF
+hub get amr -A -o jsonpath='{.items[*].metadata.name}' | grep -q "$LOCAL" && fail "a member-local instance must be invisible to the hub's ledger"
+hub delete frgd "$GEN" --wait=false >/dev/null
+wait_for 60 "Deleting=False/BlockedByInstances naming member-2 with 0 hub-placed, 1 member-local" bash -c "frgd_reason_is $GEN Deleting BlockedByInstances && frgd_cond $GEN Deleting message | grep -q '$M2 (0 hub-placed, 1 member-local instance(s))'"
+[ -n "$(hub get frgd "$GEN" -o jsonpath='{.metadata.deletionTimestamp}')" ] || fail "the wrapper must be Terminating (finalizer held)"
+[ "$(member_rgd_state "$M2" "$GEN")" = "Active" ] || fail "the definition must stay Active on member-2 while its member-local instance exists"
+member "$M2" get genaiservice "$LOCAL" -n "$WORKLOAD_NS" >/dev/null || fail "the member-local instance must be untouched by the refused removal"
+wait_gone 120 "definition removed from member-1 (nothing of the kind there)" member "$M1" get rgd "$GEN"
+wait_gone 120 "definition removed from member-3 (nothing of the kind there)" member "$M3" get rgd "$GEN"
+member "$M2" get rgd "$GEN" >/dev/null || fail "the definition must still be on member-2"
+echo "    ok: refused on member-2 only, as member-local; removed from the others"
+member "$M2" delete genaiservice "$LOCAL" -n "$WORKLOAD_NS" --timeout=180s >/dev/null
+wait_gone 180 "wrapper released once the member-local instance is gone" hub get frgd "$GEN"
+wait_gone 120 "definition removed from member-2" member "$M2" get rgd "$GEN"
+echo "### finally: restore the GenAIService definition again -> distributed and Accepted on all three members"
+hub apply -f "$REPO_ROOT/config/fleet-rgd/genaiservice-fleet-rgd.yaml" >/dev/null
+wait_for 300 "restored: ${GEN} MEMBERS 3/3" frgd_members_is "$GEN" 3/3
+wait_for 60 "restored: ${GEN} Accepted on all three with the hub hash" all_accepted_at "$GEN" "$(frgd_hash "$GEN")" "$M1" "$M2" "$M3"
 fi  # E2E_FROM
 
 echo
-echo "### e2e PASSED: all twenty success criteria hold"
+echo "### e2e PASSED: all twenty-one success criteria hold"
