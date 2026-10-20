@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -90,7 +91,10 @@ type FleetReconciler struct {
 //   - ClusterProfile on the hub, mapped to all FleetGenAIServices so
 //     inventory (and property) changes re-resolve placement;
 //   - PlacementDecision on the hub, mapped to the FleetGenAIServices that
-//     reference it, so a producer's new decision is consumed immediately.
+//     reference it, so a producer's new decision is consumed immediately;
+//   - FleetResourceGraphDefinition on the hub, mapped to all
+//     FleetGenAIServices, so the placement gate opens as soon as a member's
+//     kro accepts the definition.
 func (r *FleetReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	r.Manager = mgr
 
@@ -109,6 +113,9 @@ func (r *FleetReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
 		Watches(&clusterinventoryv1alpha1.PlacementDecision{}, r.placementDecisionHandler,
+			mcbuilder.WithEngageWithLocalCluster(true),
+			mcbuilder.WithEngageWithProviderClusters(false)).
+		Watches(&fleetv1alpha1.FleetResourceGraphDefinition{}, r.allInstancesHandler,
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
 		Complete(r)
@@ -224,9 +231,16 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// The placement gate: a member only receives an instance once the
+	// definition for its kind reports that member Active.
+	def, err := r.definitionFor(ctx, GenAIServiceGVK)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	blocked := false // a tracked member is unreachable, retry sooner
 	var statuses []fleetv1alpha1.ClusterStatus
+	var gated []string // decided members not placed: definition not Active there
 
 	// Unplace members that are no longer decided: delete exactly what their
 	// record tracks, then the record.
@@ -256,6 +270,34 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		assigned := int32(0)
+		if hasReplicas {
+			assigned = replicasOf(m.Parameters, requested)
+		}
+		// An unhealthy member is not written to anyway, and applyToMember
+		// says so; the gate is about what a reachable member's kro serves.
+		if ok, why := DefinitionGate(def, GenAIServiceGVK, m.Name); !ok && MemberHealthy(profileMap[m.Name]) {
+			// Never silently skipped: the member is reported with the
+			// definition's own reason. A copy placed earlier is held as is
+			// (still observed, not converged); a member never placed gets
+			// nothing — not even an intent record.
+			st := fleetv1alpha1.ClusterStatus{Name: m.Name, Reason: fleetv1alpha1.ReasonRGDNotReady, Message: why, AssignedReplicas: assigned}
+			if rec := records[m.Name]; rec != nil && len(rec.Status.Applied) > 0 {
+				r.observeHeldMember(ctx, desired, assigned, profileMap[m.Name], &st)
+				st.Reason = fleetv1alpha1.ReasonRGDNotReady
+				st.Message = why + "; holding the placed copy as is: " + st.Message
+				assignedTotal += st.AssignedReplicas
+				readyTotal += st.ReadyReplicas
+				if st.Ready {
+					readyClusters++
+				}
+			} else {
+				gated = append(gated, m.Name)
+			}
+			blocked = true
+			statuses = append(statuses, st)
+			continue
+		}
 		intended := []fleetv1alpha1.ManifestIdentifier{identifierOf(desired)}
 		// Intent log first: the record names what is about to be applied
 		// BEFORE the member is touched, so a crash between apply and the
@@ -263,10 +305,6 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		rec, err := r.ensureRecord(ctx, fgs, records[m.Name], m.Name, intended)
 		if err != nil {
 			return ctrl.Result{}, err
-		}
-		assigned := int32(0)
-		if hasReplicas {
-			assigned = replicasOf(m.Parameters, requested)
 		}
 		st, err := r.applyToMember(ctx, fgs, rec, m, desired, assigned, profileMap[m.Name])
 		if err != nil {
@@ -284,8 +322,14 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 	fgs.Status.Clusters = statuses
 	fgs.Status.Placement = provenance(resolved)
 	fgs.Status.Summary = fleetv1alpha1.Summary{
-		Placed: int32(len(members)), Ready: int32(readyClusters),
+		Placed: int32(len(members) - len(gated)), Ready: int32(readyClusters),
 		RequestedReplicas: requested, AssignedReplicas: assignedTotal, ReadyReplicas: readyTotal,
+	}
+	if len(gated) > 0 && placedCond.Status == metav1.ConditionTrue {
+		placedCond.Status = metav1.ConditionFalse
+		placedCond.Reason = fleetv1alpha1.ReasonRGDNotReady
+		placedCond.Message = fmt.Sprintf("placed on %d of %d decided cluster(s); the definition for %s is not Active on: %s",
+			len(members)-len(gated), len(members), GenAIServiceGVK.Kind, strings.Join(gated, ", "))
 	}
 	if !resolved.Divided() && hasReplicas {
 		// Replication: every member runs the full template.
@@ -438,12 +482,18 @@ func (r *FleetReconciler) applyToMember(ctx context.Context, fgs *fleetv1alpha1.
 		log.Info("pruned stale objects from member", "member", member, "count", len(gone))
 	}
 
-	// Read back (cached) for readiness.
+	readMemberStatus(ctx, cl.GetClient(), client.ObjectKeyFromObject(desired), assigned, &status)
+	return status, nil
+}
+
+// readMemberStatus reads the placed copy back (cached) and fills in the
+// member's readiness, replicas and endpoint.
+func readMemberStatus(ctx context.Context, cl client.Client, key client.ObjectKey, assigned int32, status *fleetv1alpha1.ClusterStatus) {
 	placed := &unstructured.Unstructured{}
 	placed.SetGroupVersionKind(GenAIServiceGVK)
-	if err := cl.GetClient().Get(ctx, client.ObjectKeyFromObject(desired), placed); err != nil {
+	if err := cl.Get(ctx, key, placed); err != nil {
 		status.Message = fmt.Sprintf("placed, readback failed: %v", err)
-		return status, nil
+		return
 	}
 	expanded, msg := MemberReady(placed)
 	status.Endpoint = MemberEndpoint(placed)
@@ -455,7 +505,37 @@ func (r *FleetReconciler) applyToMember(ctx context.Context, fgs *fleetv1alpha1.
 		status.Ready = expanded && readyReplicas >= assigned
 		status.Message = fmt.Sprintf("%s, %d/%d replicas ready", msg, readyReplicas, assigned)
 	}
-	return status, nil
+}
+
+// observeHeldMember reports a member whose copy is held (placed earlier,
+// definition no longer Active there) without writing to it.
+func (r *FleetReconciler) observeHeldMember(ctx context.Context, desired *unstructured.Unstructured, assigned int32, profile *clusterinventoryv1alpha1.ClusterProfile, status *fleetv1alpha1.ClusterStatus) {
+	if !MemberHealthy(profile) {
+		status.Message = "member not engaged (cluster manager reports ControlPlaneHealthy is not True)"
+		return
+	}
+	cl, err := r.Manager.GetCluster(ctx, r.clusterName(status.Name))
+	if err != nil {
+		status.Message = "member not engaged (unhealthy or missing credentials)"
+		return
+	}
+	readMemberStatus(ctx, cl.GetClient(), client.ObjectKeyFromObject(desired), assigned, status)
+}
+
+// definitionFor returns the hub definition whose schema serves this GVK,
+// or nil when none exists.
+func (r *FleetReconciler) definitionFor(ctx context.Context, gvk schema.GroupVersionKind) (*fleetv1alpha1.FleetResourceGraphDefinition, error) {
+	list := &fleetv1alpha1.FleetResourceGraphDefinitionList{}
+	if err := r.Manager.GetLocalManager().GetClient().List(ctx, list); err != nil {
+		return nil, fmt.Errorf("failed to list FleetResourceGraphDefinitions: %w", err)
+	}
+	for i := range list.Items {
+		k := DefinitionKind(&list.Items[i])
+		if k.Kind == gvk.Kind && k.Group == gvk.Group {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // unplace removes everything a record tracks from its member and then the
