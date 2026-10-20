@@ -666,6 +666,13 @@ echo "    member-3 entry: $(cluster_field "$ROLL" "$M3" message)"
 member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=1 >/dev/null
 wait_for 180 "member-3 accepts the new revision once its kro returns" all_accepted_at "$GEN" "$roll_hash" "$M1" "$M2" "$M3"
 wait_for 60 "${ROLL}'s member-3 entry no longer pending" bash -c "! cluster_field $ROLL $M3 message | grep -q 'revision $roll_hash pending'"
+# Revert the probe field so the definition matches config/fleet-rgd/ again: stock kro
+# keeps the generated CRD when an RGD is deleted (allowCRDDeletion is off by default),
+# and re-applying the original schema against a CRD that still has the field would be
+# refused as a breaking change ("Property rolloutProbe was removed").
+hub patch frgd "$GEN" --type=json -p '[{"op":"remove","path":"/spec/resourceGraphDefinition/schema/spec/rolloutProbe"}]' >/dev/null
+wait_for 60 "hub specHash back to ${gen_hash_old}" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" = '$gen_hash_old' ]"
+wait_for 180 "all three members Active on the reverted revision" all_accepted_at "$GEN" "$gen_hash_old" "$M1" "$M2" "$M3"
 
 echo "### criterion 20: version skew — the GenAIService definition gains a resource whose CRD only member-1 and member-2 have; member-3 rejects it with its own reason"
 member "$M1" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null

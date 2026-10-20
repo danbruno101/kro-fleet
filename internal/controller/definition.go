@@ -229,7 +229,9 @@ func DefinitionTargets(frgd *fleetv1alpha1.FleetResourceGraphDefinition, profile
 // the instances of its kind that block it split by who created them. The
 // guard reflects the member's reality, not the hub's ledger: stock kro
 // accepts an instance created directly on the member, and removing the
-// definition would delete the generated CRD and that instance with it.
+// definition would leave that instance unmanaged (stock kro shuts down
+// its controller for the kind and, with --allow-crd-deletion, deletes
+// the generated CRD and the instance with it).
 type BlockedMember struct {
 	Name string
 	// HubPlaced is the number of instances the hub placed there: the

@@ -481,7 +481,9 @@ func (r *DefinitionReconciler) removeFromMember(ctx context.Context, frgd *fleet
 // tracked manifests include the kind. It also returns the namespace/name
 // of every such tracked instance, so what the member itself lists can be
 // told apart from what the hub placed. Removing the definition there would
-// make the member's kro drop the CRD and, with it, every instance.
+// make the member's kro shut down its controller for the kind, leaving
+// every instance unmanaged — or, with kro's --allow-crd-deletion, drop the
+// CRD and every instance with it.
 func (r *DefinitionReconciler) blockingInstances(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, member string) (int, map[types.NamespacedName]bool, error) {
 	gvk := DefinitionKind(frgd)
 	tracked := map[types.NamespacedName]bool{}
