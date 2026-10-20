@@ -247,7 +247,8 @@ done
 v="$(frgd_member "$GEN" "$M1" kroVersion)"; [ -n "$v" ] || fail "kroVersion not read off member-1's kro Deployment"
 echo "    ok: member-1 runs kro ${v}; $(hub get frgd --no-headers | tr -s ' ' | tr '\n' ';')"
 apply_echo_definition
-wait_for 120 "throwaway definition ${ECHO} distributed + Accepted on the 2 registered members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M3"
+wait_for 120 "throwaway definition ${ECHO}: MEMBERS 2/2" frgd_members_is "$ECHO" 2/2
+wait_for 60 "throwaway definition ${ECHO} distributed + Accepted on the 2 registered members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M3"
 hub get rgd "$ECHO" >/dev/null 2>&1 && fail "no copy of a definition may exist on the hub"
 
 echo "### criterion 1: place -> Ready on every matching member"
@@ -579,7 +580,8 @@ fi  # E2E_FROM
 # --- definition distribution scenarios (criteria 14, 15, 17-20); 13 and 16 ran with the replicated flow
 if [ "${E2E_FROM:-1}" -le 13 ]; then
 hub get frgd "$ECHO" >/dev/null 2>&1 || apply_echo_definition   # E2E_FROM >= 13: criterion 13 did not run
-wait_for 180 "${ECHO} Accepted on all three members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+wait_for 180 "${ECHO}: MEMBERS 3/3" frgd_members_is "$ECHO" 3/3
+wait_for 60 "${ECHO} Accepted on all three members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
 
 echo "### criterion 14: distribution.enabled=false removes the definition from every member"
 hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":false}}}' >/dev/null
@@ -704,7 +706,8 @@ wait_gone 180 "wrapper released once its last instance is gone" hub get frgd "$G
 for m in "$M1" "$M2" "$M3"; do wait_gone 120 "definition removed from $m" member "$m" get rgd "$GEN"; done
 echo "### finally: restore the GenAIService definition (config/fleet-rgd/) -> distributed and Accepted on all three members again"
 hub apply -f "$REPO_ROOT/config/fleet-rgd/genaiservice-fleet-rgd.yaml" >/dev/null
-wait_for 300 "restored: ${GEN} Accepted 3/3" all_accepted_at "$GEN" "$(frgd_hash "$GEN")" "$M1" "$M2" "$M3"
+wait_for 300 "restored: ${GEN} MEMBERS 3/3" frgd_members_is "$GEN" 3/3
+wait_for 60 "restored: ${GEN} Accepted on all three with the hub hash" all_accepted_at "$GEN" "$(frgd_hash "$GEN")" "$M1" "$M2" "$M3"
 fi  # E2E_FROM
 
 echo
