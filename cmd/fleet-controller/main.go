@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// The hub-side fleet placement controller: watches FleetGenAIService objects
+// The hub-side fleet placement controller: distributes FleetResourceGraphDefinition
+// objects on the hub to members as plain kro ResourceGraphDefinitions and
+// reads each member kro's verdict back; watches FleetGenAIService objects
 // on the hub, consumes their placement — an inline selector or a
 // PlacementDecision (KEP-5313) written by something else — against the
 // ClusterProfile inventory (cluster-inventory-api, KEP-4322), and reconciles
@@ -43,18 +45,19 @@ import (
 func main() {
 	var opts hub.Options
 	opts.BindFlags(flag.CommandLine)
+	memberKroNamespace := flag.String("member-kro-namespace", controller.DefaultMemberKroNamespace, "namespace of the stock kro installation on members (only used to read the kro version off its Deployment)")
 	flag.Parse()
 
 	ctrllog.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrllog.Log.WithName("fleet-controller")
 
-	if err := run(opts); err != nil {
+	if err := run(opts, *memberKroNamespace); err != nil {
 		log.Error(err, "fleet controller failed")
 		os.Exit(1)
 	}
 }
 
-func run(opts hub.Options) error {
+func run(opts hub.Options, memberKroNamespace string) error {
 	ctx := signals.SetupSignalHandler()
 
 	mgr, cleanup, err := hub.NewManager(opts)
@@ -63,6 +66,14 @@ func run(opts hub.Options) error {
 		return err
 	}
 
+	// Definitions first: a FleetResourceGraphDefinition authored once on the
+	// hub is handed to members as a plain ResourceGraphDefinition, and the
+	// instance controller below only places onto members whose kro reports
+	// it Active (KREP-013's distribution half; the hub never expands a graph).
+	dr := &controller.DefinitionReconciler{FleetNamespace: opts.FleetNamespace, MemberKroNamespace: memberKroNamespace}
+	if err := dr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to set up definition controller: %w", err)
+	}
 	r := &controller.FleetReconciler{FleetNamespace: opts.FleetNamespace}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed to set up fleet controller: %w", err)

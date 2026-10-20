@@ -5,14 +5,20 @@
 #   hub:     ClusterProfile + PlacementDecision CRDs (cluster-inventory-api),
 #            the fleet.kro.run CRDs, one ClusterProfile per member whose
 #            status.accessProviders points an exec credential plugin at that
-#            member's kubeconfig Secret (KEP-4322 / KEP-5339).
-#   members: stock kro (pinned Helm chart) + the fleet RGDs (config/rgd/:
-#            GenAIService + ClusterPlatform, derived from the sister repo's)
-#            + one ClusterPlatform instance per simulated cloud + the About
-#            API ClusterProperty CRD with that cloud persona's properties +
-#            a fake accelerator resource (example.com/gpu) on the node so the
-#            capacity story runs with zero GPUs. Members are UNMODIFIED kro —
-#            the only fleet-aware code anywhere runs on the hub.
+#            member's kubeconfig Secret (KEP-4322 / KEP-5339), and the two
+#            fleet definitions (config/fleet-rgd/: GenAIService +
+#            ClusterPlatform, derived from the sister repo's) authored ONCE
+#            as FleetResourceGraphDefinitions.
+#   members: stock kro (pinned Helm chart) + the About API ClusterProperty
+#            CRD with that cloud persona's properties + a fake accelerator
+#            resource (example.com/gpu) on the node so the capacity story
+#            runs with zero GPUs + one ClusterPlatform instance per simulated
+#            cloud. The ResourceGraphDefinitions themselves arrive from the
+#            hub: a bootstrap fleet controller runs for the duration of this
+#            script to distribute them, and each member's stock kro accepts
+#            them before its ClusterPlatform is applied. Members are
+#            UNMODIFIED kro — the only fleet-aware code anywhere runs on the
+#            hub.
 #
 # Usage:  scripts/setup-fleet.sh [num-members]        (default: 2)
 # Then:   go run ./cmd/fleet-controller --hub-context kind-${PREFIX}-hub \
@@ -34,8 +40,9 @@ TIER="${TIER:-prod}"                          # placement label on every member
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5}"
 KRO_CHART="${KRO_CHART:-oci://registry.k8s.io/kro/charts/kro}"
 KRO_VERSION="${KRO_VERSION:-0.9.4}"   # OCI tag (chart reports itself as v0.9.4)
-# The fleet RGDs in config/rgd/ are derived from the sister project at commit
-# cf7ae45 (kro >= 0.9.3 rejects the older RGD's `status.conditions` string).
+# The fleet definitions in config/fleet-rgd/ are derived from the sister
+# project at commit cf7ae45 (kro >= 0.9.3 rejects the older RGD's
+# `status.conditions` string).
 # cluster-inventory-api / about-api pins live in scripts/lib/fleet.sh.
 
 # Simulated accelerators: each member advertises this many units of this
@@ -57,6 +64,13 @@ KIND_CONFIG="${REPO_ROOT}/config/kind/cluster.yaml"
 HUB="${PREFIX}-hub"
 HUB_CTX="kind-${HUB}"
 PLUGIN_BIN="${PLUGIN_BIN:-${REPO_ROOT}/bin/kubeconfig-secretreader-plugin}"
+# BOOTSTRAP_CONTROLLER=false skips the setup-time fleet controller (set it when
+# one is already running against this hub); the definitions are then waited
+# for, not distributed, by this script.
+BOOTSTRAP_CONTROLLER="${BOOTSTRAP_CONTROLLER:-true}"
+CTRL_BIN="${CTRL_BIN:-${REPO_ROOT}/bin/fleet-controller}"
+CTRL_LOG="${CTRL_LOG:-$(mktemp -t fleet-controller-setup-XXXX.log)}"
+CTRL_PID=""
 
 # shellcheck source=lib/fleet.sh
 . "${REPO_ROOT}/scripts/lib/fleet.sh"
@@ -75,6 +89,16 @@ CAPACITY_TYPES=(on-demand spot on-demand)
 COMPLIANCE=("" fedramp-high "")
 
 log() { fleet::log "$@"; }
+
+stop_bootstrap_controller() {
+  if [ -n "$CTRL_PID" ] && kill -0 "$CTRL_PID" 2>/dev/null; then
+    log "stopping the bootstrap fleet controller (pid ${CTRL_PID}; log: ${CTRL_LOG})"
+    kill "$CTRL_PID" 2>/dev/null || true
+    wait "$CTRL_PID" 2>/dev/null || true
+  fi
+  CTRL_PID=""
+}
+trap stop_bootstrap_controller EXIT
 
 have_cluster() { kind get clusters 2>/dev/null | grep -qx "$1"; }
 
@@ -139,13 +163,41 @@ for i in $(seq 1 "$MEMBERS"); do
     fleet::fake_accelerators "$ctx" "$FAKE_GPU_RESOURCE" "$FAKE_GPUS"
   fi
 
-  log "[$member] applying the fleet RGDs (config/rgd/, derived from the sister repo)"
-  kubectl --context "$ctx" apply -f "${REPO_ROOT}/config/rgd/"
-  kubectl --context "$ctx" wait rgd/genaiservice.kro.run rgd/clusterplatform.kro.run \
-    --for=jsonpath='{.status.state}'=Active --timeout=120s
+  kubectl --context "$ctx" create namespace "$WORKLOAD_NS" --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
+
+  # Register on the hub: ClusterProfile + accessProviders + kubeconfig Secret.
+  kc="$(mktemp -t "${member}-XXXX.kubeconfig")"
+  kind get kubeconfig --name "$member" > "$kc"
+  fleet::register_member "$member" "$cloud" "$kc" "$TIER"
+  rm -f "$kc"
+done
+
+# --- definitions: authored once on the hub, distributed to every member ---------
+fleet::apply_definitions
+if [ "$BOOTSTRAP_CONTROLLER" = "true" ]; then
+  log "starting a bootstrap fleet controller (host process) to distribute the definitions -> ${CTRL_BIN}"
+  ( cd "$REPO_ROOT" && go build -o "$CTRL_BIN" ./cmd/fleet-controller )
+  "$CTRL_BIN" --hub-context "$HUB_CTX" --fleet-namespace "$FLEET_NS" \
+    --kubeconfig-secretreader-plugin "$PLUGIN_BIN" >"$CTRL_LOG" 2>&1 &
+  CTRL_PID=$!
+fi
+fleet::wait_until 300 "hub reports both definitions Accepted on every member (kubectl --context ${HUB_CTX} get frgd)" fleet::definitions_accepted
+fleet::hub get frgd
+
+# --- platform layer: one ClusterPlatform per member, once its kro serves the kind
+for i in $(seq 1 "$MEMBERS"); do
+  member="${PREFIX}-member-${i}"
+  ctx="kind-${member}"
+  idx=$(( (i-1) % ${#CLOUDS[@]} ))
+  cloud="${CLOUDS[$idx]}"
+  class="${CLASSES[$idx]}"
+  region="${REGIONS[$idx]}"
+
+  for d in genaiservice.kro.run clusterplatform.kro.run; do
+    fleet::wait_until 120 "[$member] stock kro reports the distributed definition ${d} Active" fleet::member_definition_active "$ctx" "$d"
+  done
 
   log "[$member] applying ClusterPlatform instance (cloud=${cloud}, region=${region}, storageClass=${class})"
-  kubectl --context "$ctx" create namespace "$WORKLOAD_NS" --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
   # The GenAIService RGD resolves each cluster's StorageClass from the
   # genaiops-platform-config ConfigMap this instance emits — it must live in the
   # namespace workloads are placed into (kro expands children into the
@@ -170,14 +222,10 @@ EOF
   # kro states are cased differently: RGDs report "Active", instances "ACTIVE".
   kubectl --context "$ctx" -n "$WORKLOAD_NS" wait clusterplatform/platform \
     --for=jsonpath='{.status.state}'=ACTIVE --timeout=120s
-
-  # Register on the hub: ClusterProfile + accessProviders + kubeconfig Secret.
-  kc="$(mktemp -t "${member}-XXXX.kubeconfig")"
-  kind get kubeconfig --name "$member" > "$kc"
-  fleet::register_member "$member" "$cloud" "$kc" "$TIER"
-  rm -f "$kc"
 done
+stop_bootstrap_controller
 
 log "fleet ready: hub=${HUB} members=${MEMBERS}"
 log "next: go run ./cmd/fleet-controller --hub-context ${HUB_CTX} --fleet-namespace ${FLEET_NS} --kubeconfig-secretreader-plugin ${PLUGIN_BIN}"
 log "then: kubectl --context ${HUB_CTX} apply -f examples/fleetgenaiservice-sample.yaml"
+log "the definitions: kubectl --context ${HUB_CTX} get frgd   (one row per FleetResourceGraphDefinition, MEMBERS = accepted/targeted)"

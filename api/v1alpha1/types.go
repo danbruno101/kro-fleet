@@ -252,6 +252,13 @@ type ClusterStatus struct {
 	// member (kro instance state ACTIVE or a true Ready condition).
 	Ready bool `json:"ready"`
 
+	// Reason is a machine-readable reason when the member is not placed or
+	// not ready for a fleet-level cause — today RGDNotReady: the definition
+	// for the instance's kind does not report this member Active, so no
+	// copy is placed there (or an earlier copy is held as is).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
 	// AssignedReplicas is the replica count this member's copy was given.
 	// +optional
 	AssignedReplicas int32 `json:"assignedReplicas,omitempty"`

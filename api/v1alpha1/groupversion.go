@@ -28,6 +28,8 @@ func AddToScheme(s *runtime.Scheme) error {
 		&FleetGenAIServiceList{},
 		&AppliedManifestRecord{},
 		&AppliedManifestRecordList{},
+		&FleetResourceGraphDefinition{},
+		&FleetResourceGraphDefinitionList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

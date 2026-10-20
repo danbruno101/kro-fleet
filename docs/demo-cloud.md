@@ -16,7 +16,7 @@ node pools; the developer's instance is identical in both modes.
 | Where | What | Why there |
 |---|---|---|
 | **Your laptop** | the hub: a kind cluster, the fleet controller, the demo inventory agent + scheduler, the gateway | No cross-cloud identity federation on the critical path: the hub reaches each cloud through that cloud's **own exec plugin** (`aws eks get-token`, `gke-gcloud-auth-plugin`, `kubelogin`) using the logins already on the laptop, via `ClusterProfile.status.accessProviders` (KEP-4322 / KEP-5339). It is the one component you fully control on stage, it makes the neutrality point (the hub is not one of the clouds), and a reset is instant and free. |
-| EKS (Auto Mode), GKE, AKS | one member each: stock kro 0.9.4, the fleet RGDs, that cloud's `ClusterPlatform`, the About API properties | The three clouds the abstract names. Nothing fleet-aware runs on a member. |
+| EKS (Auto Mode), GKE, AKS | one member each: stock kro 0.9.4, the fleet definitions (distributed from the hub as plain RGDs, accepted by that cloud's kro), that cloud's `ClusterPlatform`, the About API properties | The three clouds the abstract names. Nothing fleet-aware runs on a member. |
 
 A cloud-hosted hub (e.g. on GKE, reaching EKS and AKS through workload
 identity federation) is a stretch goal, not built: it adds two federation

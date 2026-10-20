@@ -523,6 +523,14 @@ The question for this group is therefore narrower than "how do we do
 cross-cluster GC": is hub-side tracking plus a finalizer the pattern this group
 wants standardised, given OCM already does essentially this?
 
+Deleting the *definition* is the third part of "what does deleting a spanning
+instance mean", and the PoC's answer is a guard: a `ResourceGraphDefinition`
+distributed from the hub is never removed from a member while the hub's
+inventory still records instances of that kind there (stock kro deletes the
+generated CRD with the RGD, and every instance with it). The wrapper stays in
+Terminating with `Deleting=False/BlockedByInstances` naming the members and
+counts, and removal proceeds on its own once the instances are gone.
+
 ### Push vs pull may be dictated by compliance, not preference
 
 In FedRAMP High / IL5-style environments, a hub outside the accreditation
@@ -534,7 +542,10 @@ most want the compliance case — hence R6.
 
 kro's graph acceptance is computed against one cluster's API surface. Member
 clusters differ, so `GraphAccepted` may need to become per-target-cluster rather
-than a single condition.
+than a single condition. The PoC sidesteps rather than solves this: because
+each member's own kro validates the distributed definition, per-cluster graph
+acceptance falls out by construction — the hub only reads each member's verdict
+back (`status.members[]`, e2e criterion 20) and gates placement on it.
 
 ### Scale
 
@@ -565,7 +576,9 @@ composition layer exists to provide.
   - **kro-fleet** (this repository) — KEP-kro-multicluster plus a working PoC of
     Approach 1 on ClusterProfile + multicluster-runtime: placement, per-member
     status aggregation, hub-side applied-manifest tracking, finalizer teardown,
-    e2e on kind, and a Headlamp fleet view. The closest work to this document
+    hub-authored definitions distributed to members with per-member acceptance
+    (the distribution half of kro's KREP-013), e2e on kind, and a Headlamp
+    fleet view. The closest work to this document
     because it *is* the same effort — this document is its problem framing, and
     `docs/KEP-GAP.md` is the honest ledger of what the PoC does and does not
     prove.
