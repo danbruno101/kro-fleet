@@ -95,7 +95,7 @@ decision; it never computes one.
    │     or a consumed PlacementDecision (+ per-member replicas) │
    │   • reads the ClusterProfile inventory + status.properties │
    │   • places each member's copy where its definition is      │
-   │     Active (else RGDNotReady); AppliedManifestRecord per   │
+   │     serving (else RGDNotReady); AppliedManifestRecord per  │
    │     (instance, member); GC on unplace/delete, orphan ledger │
    │   • Placed (fail-closed) + Ready (by replicas) on the hub   │
    │  demo-only: inventory agent, scheduler, gateway (fleet-demo)│
