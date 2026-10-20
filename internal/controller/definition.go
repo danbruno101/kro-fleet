@@ -42,16 +42,57 @@ import (
 // FleetResourceGraphDefinition distributes: stock kro's own API, unchanged.
 var ResourceGraphDefinitionGVK = schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "ResourceGraphDefinition"}
 
-// DefinitionSpecHash hashes spec.resourceGraphDefinition as the hub stores
-// it. Members carry it as a label, so "which revision does this member
-// hold" is read back, never assumed. Short enough for a label value.
+// DefinitionSpecHash hashes spec.resourceGraphDefinition exactly as a
+// member receives it (DefinitionSpecMap). Members carry it as a label, so
+// "which revision does this member hold" is read back, never assumed.
+// Short enough for a label value.
 func DefinitionSpecHash(spec *krov1alpha1.ResourceGraphDefinitionSpec) (string, error) {
-	b, err := json.Marshal(spec)
+	m, err := DefinitionSpecMap(spec)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(m)
 	if err != nil {
 		return "", fmt.Errorf("failed to hash resourceGraphDefinition: %w", err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])[:32], nil
+}
+
+// DefinitionSpecMap turns kro's typed spec back into the plain object a
+// user would have applied. kro's RawExtension fields (schema.types, a
+// resource's template or externalRef) marshal as JSON null when unset,
+// which kro's own CRD rejects; those keys are what the author never wrote,
+// so they are dropped — nothing else is touched.
+func DefinitionSpecMap(spec *krov1alpha1.ResourceGraphDefinitionSpec) (map[string]interface{}, error) {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render resourceGraphDefinition: %w", err)
+	}
+	m := map[string]interface{}{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("resourceGraphDefinition is not an object: %w", err)
+	}
+	dropNulls(m)
+	return m, nil
+}
+
+// dropNulls removes JSON null values from a decoded object, recursively.
+func dropNulls(v interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, e := range t {
+			if e == nil {
+				delete(t, k)
+				continue
+			}
+			dropNulls(e)
+		}
+	case []interface{}:
+		for _, e := range t {
+			dropNulls(e)
+		}
+	}
 }
 
 // RenderDefinition builds the plain ResourceGraphDefinition a member
@@ -60,13 +101,9 @@ func DefinitionSpecHash(spec *krov1alpha1.ResourceGraphDefinitionSpec) (string, 
 // hash on the metadata. Nothing fleet-specific inside the spec — a member
 // gets exactly what a user would have applied by hand.
 func RenderDefinition(frgd *fleetv1alpha1.FleetResourceGraphDefinition, hash string) (*unstructured.Unstructured, error) {
-	b, err := json.Marshal(&frgd.Spec.ResourceGraphDefinition)
+	spec, err := DefinitionSpecMap(&frgd.Spec.ResourceGraphDefinition)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render resourceGraphDefinition: %w", err)
-	}
-	spec := map[string]interface{}{}
-	if err := json.Unmarshal(b, &spec); err != nil {
-		return nil, fmt.Errorf("resourceGraphDefinition is not an object: %w", err)
+		return nil, err
 	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(ResourceGraphDefinitionGVK)
@@ -243,7 +280,7 @@ func RollupDefinition(in DefinitionRollup) (distributed, accepted, deleting meta
 		distributed.Reason, distributed.Message = fleetv1alpha1.ReasonNoMatchingMembers, "memberSelector matches no registered member"
 		accepted.Reason, accepted.Message = fleetv1alpha1.ReasonNoMatchingMembers, distributed.Message
 	default:
-		if len(notApplied) == 0 {
+		if len(notApplied) == 0 && summary.Distributed > 0 {
 			distributed.Status, distributed.Reason = metav1.ConditionTrue, fleetv1alpha1.ReasonDistributed
 			distributed.Message = fmt.Sprintf("current revision on %d/%d targeted member(s)", summary.Distributed, summary.Targeted)
 		} else {

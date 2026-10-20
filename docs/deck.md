@@ -67,16 +67,18 @@ If this PoC ever reimplements propagation, it has become Karmada — stop.
 ```
                       HUB (kind)
   ┌────────────────────────────────────────────────┐
+  │ FleetResourceGraphDefinition {kro RGD spec}    │
   │ FleetGenAIService  {template, clusterSelector} │
   │ fleet placement controller (mc-runtime)        │
-  │  resolve placement → SSA into members          │
+  │  distribute the RGD → read each kro's verdict  │
+  │  resolve placement → SSA into members (gated)  │
   │  track → GC (finalizer) → aggregate status     │
   └──────────┬──────────────────────┬──────────────┘
      ClusterProfile + Secret   (inventory + creds)
   ┌───────────▼─────────┐  ┌────────▼────────────┐
   │ member-1 "gke"      │  │ member-2 "aks"      │
-  │ stock kro + RGDs    │  │ stock kro + RGDs    │
-  │ expands the graph   │  │ expands the graph   │
+  │ stock kro, RGD from │  │ stock kro, RGD from │
+  │ the hub; expands    │  │ the hub; expands    │
   │ PVC: premium-rwo    │  │ PVC: managed-csi    │
   └─────────────────────┘  └─────────────────────┘
 ```
@@ -148,7 +150,7 @@ One `kubectl get` answers "is my fleet converged?"
 
 ---
 
-## What CI proves (all twelve, on kind, hermetic)
+## What CI proves (all twenty, on kind, hermetic)
 
 1. one hub object → workload **Ready on every matching member**
 2. mutate the hub object → **all members converge**
@@ -162,6 +164,9 @@ One `kubectl get` answers "is my fleet converged?"
 10. **compliance**: only the accredited cloud, shortfall reported, no spill
 11. **drain**: replicas move, readiness recovers, record gone
 12. **one URL** answered from several clouds (cloud-provider-kind)
+13. –20. the **definition** authored once too: distributed, late joiner,
+    off switch, selector, update, **placement gate**, **deletion guard**,
+    **version skew** (one member rejects, in its own words)
 
 Plus the portability beat: the *same* hub object binds
 `premium-rwo` on the gke sim and `managed-csi` on the aks sim.
@@ -211,7 +216,7 @@ scripts/setup-fleet.sh 3
 go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin
 go run ./cmd/fleet-demo all     --hub-context kind-kro-fleet-hub --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin
 kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-divided.yaml
-scripts/e2e.sh        # the twelve criteria, asserted
+scripts/e2e.sh        # the twenty criteria, asserted
 ```
 
 **github.com/danbruno101/kro-fleet** — KEP draft in `docs/proposals/`

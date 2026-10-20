@@ -105,6 +105,16 @@ func TestRenderDefinitionIsVerbatimAndPlain(t *testing.T) {
 	if len(res) != 1 {
 		t.Fatalf("resources not copied verbatim: %v", res)
 	}
+	// kro's unset RawExtension fields must not arrive as JSON null: a member
+	// kro rejects `types: null` / `externalRef: null`.
+	if _, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "schema", "types"); found {
+		t.Fatal("unset schema.types must be omitted, not null")
+	}
+	if r0, ok := res[0].(map[string]interface{}); !ok || r0["externalRef"] != nil {
+		t.Fatalf("unset externalRef must be omitted, got %v", res[0])
+	} else if _, has := r0["externalRef"]; has {
+		t.Fatal("unset externalRef key must be absent")
+	}
 }
 
 func TestObserveDefinition(t *testing.T) {
@@ -227,6 +237,12 @@ func TestRollupDefinition(t *testing.T) {
 		}
 		if a.Status != metav1.ConditionFalse || !strings.Contains(a.Message, "m2: MemberNotEngaged") || s.Members != "1/2" {
 			t.Fatalf("unexpected: %+v %+v", a, s)
+		}
+	})
+	t.Run("nobody engaged is not distributed", func(t *testing.T) {
+		d, _, _, _ := RollupDefinition(DefinitionRollup{Enabled: true, Targets: []string{"m1"}, Members: []fleetv1alpha1.MemberDefinitionStatus{member("m1", false, "", "", fleetv1alpha1.ReasonMemberNotEngaged)}})
+		if d.Status == metav1.ConditionTrue {
+			t.Fatalf("with no member reachable, Distributed must not be vacuously True: %+v", d)
 		}
 	})
 	t.Run("disabled and no match are explicit, never vacuously true", func(t *testing.T) {

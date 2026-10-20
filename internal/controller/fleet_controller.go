@@ -87,7 +87,8 @@ type FleetReconciler struct {
 //   - FleetGenAIService on the hub (local cluster only — members never carry
 //     this CRD);
 //   - the placed GenAIService on every engaged member (provider clusters
-//     only), mapped back to the same-named hub object;
+//     only), mapped back to the same-named hub object — started lazily,
+//     once the member serves the kind (see LazyMemberKind);
 //   - ClusterProfile on the hub, mapped to all FleetGenAIServices so
 //     inventory (and property) changes re-resolve placement;
 //   - PlacementDecision on the hub, mapped to the FleetGenAIServices that
@@ -101,14 +102,11 @@ func (r *FleetReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	memberObj := &unstructured.Unstructured{}
 	memberObj.SetGroupVersionKind(GenAIServiceGVK)
 
-	return mcbuilder.ControllerManagedBy(mgr).
+	c, err := mcbuilder.ControllerManagedBy(mgr).
 		Named("fleetgenaiservice").
 		For(&fleetv1alpha1.FleetGenAIService{},
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
-		Watches(memberObj, r.memberObjectHandler,
-			mcbuilder.WithEngageWithLocalCluster(false),
-			mcbuilder.WithEngageWithProviderClusters(true)).
 		Watches(&clusterinventoryv1alpha1.ClusterProfile{}, r.allInstancesHandler,
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
@@ -118,7 +116,14 @@ func (r *FleetReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 		Watches(&fleetv1alpha1.FleetResourceGraphDefinition{}, r.allInstancesHandler,
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	// The GenAIService CRD only exists on a member once its kro has accepted
+	// the distributed definition, i.e. after the member engaged: the watch
+	// must not fail the engagement while the kind is missing.
+	return c.MultiClusterWatch(LazyMemberKind(memberObj, r.memberObjectHandler))
 }
 
 // memberObjectHandler maps a placed GenAIService event on a member to the

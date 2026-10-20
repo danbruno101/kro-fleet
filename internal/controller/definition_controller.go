@@ -83,7 +83,8 @@ type kroVersionEntry struct {
 //   - FleetResourceGraphDefinition on the hub (local only);
 //   - the distributed ResourceGraphDefinition on every engaged member
 //     (provider clusters only), mapped back to the same-named hub object —
-//     this is how member status reaches the hub, no polling;
+//     this is how member status reaches the hub, no polling (started lazily
+//     once the member serves the kind, see LazyMemberKind);
 //   - ClusterProfile on the hub, mapped to every definition, so new or
 //     relabeled members receive (or lose) definitions;
 //   - AppliedManifestRecord on the hub, mapped to the definitions of the
@@ -98,21 +99,24 @@ func (r *DefinitionReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	memberObj := &unstructured.Unstructured{}
 	memberObj.SetGroupVersionKind(ResourceGraphDefinitionGVK)
 
-	return mcbuilder.ControllerManagedBy(mgr).
+	c, err := mcbuilder.ControllerManagedBy(mgr).
 		Named("fleetresourcegraphdefinition").
 		For(&fleetv1alpha1.FleetResourceGraphDefinition{},
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
-		Watches(memberObj, r.memberDefinitionHandler,
-			mcbuilder.WithEngageWithLocalCluster(false),
-			mcbuilder.WithEngageWithProviderClusters(true)).
 		Watches(&clusterinventoryv1alpha1.ClusterProfile{}, r.allDefinitionsHandler,
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
 		Watches(&fleetv1alpha1.AppliedManifestRecord{}, r.recordHandler,
 			mcbuilder.WithEngageWithLocalCluster(true),
 			mcbuilder.WithEngageWithProviderClusters(false)).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	// A member without kro (yet) must still engage, so its status can say
+	// so; the watch starts once the member serves the kind.
+	return c.MultiClusterWatch(LazyMemberKind(memberObj, r.memberDefinitionHandler))
 }
 
 // memberDefinitionHandler maps a distributed ResourceGraphDefinition event

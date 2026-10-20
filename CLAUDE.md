@@ -55,7 +55,8 @@ image are the workload placed across the fleet.
 1. The `FleetGenAIService` type + the placement controller (place → track → GC →
    aggregate).
 2. `scripts/setup-fleet.sh` / `teardown-fleet.sh` (hub + N members; ClusterProfiles;
-   stock kro + sister RGDs on members).
+   stock kro on members; the sister-derived RGDs authored on the hub as
+   `FleetResourceGraphDefinition`s in `config/fleet-rgd/` and distributed).
 3. Hermetic CI proving the full loop; runbook; Marp deck; `docs/KEP-GAP.md`.
 
 ## Conventions
@@ -153,7 +154,7 @@ api/           # FleetGenAIService types
 internal/      # controller, placement, applied-manifest tracking, status agg
 scripts/       # setup-fleet.sh, teardown-fleet.sh
 examples/      # FleetGenAIService samples
-config/        # CRDs, RBAC, kind configs
+config/        # CRDs, fleet-rgd/ (hub-authored definitions), kind configs
 docs/          # RUNBOOK.md, KEP-GAP.md, deck, design/fleet-scoped-kro.md,
                # proposals/KEP-kro-multicluster.md
 headlamp-plugin/     # the fleet dashboard (Headlamp plugin)
