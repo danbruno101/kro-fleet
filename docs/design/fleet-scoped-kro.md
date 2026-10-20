@@ -425,7 +425,10 @@ explicit tolerance (`minReadyClusters`) folding into the rolled-up `Ready`
 condition. (The KEP additionally specifies that members unreachable beyond a
 grace period surface `Degraded`/`Unknown` rather than blocking the object; the
 PoC currently just marks them not-ready with a reason and retries — one of the
-gaps ledgered in `docs/KEP-GAP.md`.)
+gaps ledgered in `docs/KEP-GAP.md`.) A related call the PoC had to make: while
+a *definition* is being updated across members, `Placed` reports whether each
+member can serve the kind at all, not whether it is on the latest revision —
+see "Placement gate semantics during a definition update" in `docs/KEP-GAP.md`.
 
 Open part: whether tolerance should generalise to a policy enum
 (`All`/`Any`/`Quorum`/percentage), and whether this matches how this group thinks
@@ -545,7 +548,10 @@ clusters differ, so `GraphAccepted` may need to become per-target-cluster rather
 than a single condition. The PoC sidesteps rather than solves this: because
 each member's own kro validates the distributed definition, per-cluster graph
 acceptance falls out by construction — the hub only reads each member's verdict
-back (`status.members[]`, e2e criterion 20) and gates placement on it.
+back (`status.members[]`, e2e criterion 20) and gates placement on it. Note
+this is detection *after* distribution, not validation *before* it: the target
+cluster is known at distribution time, not at authoring time, so a bad revision
+reaches every member before any member reports rejecting it.
 
 ### Scale
 

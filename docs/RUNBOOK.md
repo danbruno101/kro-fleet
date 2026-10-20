@@ -69,12 +69,17 @@ says every member's kro reports it Active (False names the first member that
 does not, with its reason). Edit the wrapper's `spec.resourceGraphDefinition`
 and every member's copy follows (its `fleet.kro.run/spec-hash` label changes);
 set `spec.distribution.enabled: false` or a `memberSelector` and the definition
-is removed where it no longer belongs — **unless** hub-placed instances of its
-kind still exist there (`kubectl get frgd … -o jsonpath='{.status.conditions[?(@.type=="Deleting")]}'`
-then says `BlockedByInstances`, naming the members and counts; it proceeds on
-its own once they are gone). An instance is only placed onto a member once its
-definition reports that member Active; until then the member appears in the
-instance's `status.clusters[]` with reason `RGDNotReady`.
+is removed where it no longer belongs — **unless** instances of its kind still
+exist there, placed by the hub or created directly on the member (`kubectl get
+frgd … -o jsonpath='{.status.conditions[?(@.type=="Deleting")]}'` then says
+`BlockedByInstances`, naming each member with both counts, e.g.
+`member-2 (0 hub-placed, 1 member-local instance(s))`; it proceeds on its own
+once they are gone). An instance is only placed onto a member once its
+definition reports that member's kro serving the kind (Active at some
+revision, the current one not rejected); until then the member appears in the
+instance's `status.clusters[]` with reason `RGDNotReady`. While a member is
+still evaluating a new revision, instances placed there stay placed and their
+entry says `serving revision <old>; revision <new> pending`.
 
 ## 2b. Start the demo-only producers (inventory agent + scheduler)
 
@@ -176,6 +181,6 @@ scripts/teardown-fleet.sh
 | `Placed=False/DecisionPending` forever | No `PlacementDecision` named in `decisionRef` exists: the demo scheduler is not running, or the instance is annotated `scheduler.example.com/policy: manual` and nobody wrote one. |
 | `gpus-free.example.com` missing on the hub | The inventory agent (`fleet-demo all` or `inventory-agent`) is not running, or the member lacks the About API CRD. |
 | `Placed=False/DecisionViolatesRequirements` | The decision names a member that lacks a `requirements.matchProperties` property; fix the property (or the decision), never the requirement. |
-| `Placed=False/RGDNotReady`, a member listed with reason `RGDNotReady` | The `FleetResourceGraphDefinition` for `GenAIService` does not report that member Active: `kubectl get frgd genaiservice.kro.run -o yaml` shows the member's own kro reason (not distributed there, an older hash, or a rejected graph — e.g. a resource kind that member's API server does not have). Nothing is placed there until it is. |
-| `frgd` stuck Terminating, `Deleting=False/BlockedByInstances` | Instances of that kind placed by the hub still exist on the named members (stock kro would delete the generated CRD, and every instance with it). Delete or unplace those `FleetGenAIService`s; the definition is removed on its own afterwards. |
+| `Placed=False/RGDNotReady`, a member listed with reason `RGDNotReady` | The `FleetResourceGraphDefinition` for `GenAIService` does not report that member's kro serving the kind: `kubectl get frgd genaiservice.kro.run -o yaml` shows the member's own kro reason (not distributed there, never reported Active, or the current revision rejected — e.g. a resource kind that member's API server does not have; the entry names the revision it last accepted). Nothing new is placed there until it is; a copy placed earlier is held as is. A member merely behind on a revision is *not* gated: its instance entries say `revision … pending`. |
+| `frgd` stuck Terminating, `Deleting=False/BlockedByInstances` | Instances of that kind still exist on the named members — `hub-placed` (by a `FleetGenAIService`) or `member-local` (created on the member directly, which stock kro accepts) — and removing the definition would leave them unmanaged (stock kro shuts down its controller for the kind; with `--allow-crd-deletion` it also deletes the generated CRD, and every instance with it). Delete or unplace the `FleetGenAIService`s, and delete member-local instances on the member; the definition is removed on its own afterwards. |
 | `kubectl get rgd` on the hub says the resource type is unknown | Correct: no kro runs on the hub. Definitions live there as `frgd`; the plain `rgd` exists only on members. |

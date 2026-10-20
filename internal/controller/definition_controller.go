@@ -24,9 +24,11 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterinventoryv1alpha1 "sigs.k8s.io/cluster-inventory-api/apis/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -352,7 +354,7 @@ func (r *DefinitionReconciler) finalize(ctx context.Context, frgd *fleetv1alpha1
 // (the freshest view of the copy). Everything reported is observed.
 func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, desired *unstructured.Unstructured, hash, member string, profile *clusterinventoryv1alpha1.ClusterProfile, prev fleetv1alpha1.MemberDefinitionStatus) fleetv1alpha1.MemberDefinitionStatus {
 	log := ctrllog.FromContext(ctx)
-	st := fleetv1alpha1.MemberDefinitionStatus{Name: member, AppliedHash: prev.AppliedHash, UID: prev.UID, KroVersion: prev.KroVersion, LastTransitionTime: prev.LastTransitionTime}
+	st := fleetv1alpha1.MemberDefinitionStatus{Name: member, AppliedHash: prev.AppliedHash, AcceptedHash: prev.AcceptedHash, UID: prev.UID, KroVersion: prev.KroVersion, LastTransitionTime: prev.LastTransitionTime}
 
 	st.Applied = prev.AppliedHash == hash // as last observed, until the member answers again
 	if !MemberHealthy(profile) {
@@ -382,8 +384,13 @@ func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fle
 		// kro has not evaluated this generation yet: its Ready is about an
 		// older revision. Say so rather than letting a stale True count.
 		st.Ready = string(metav1.ConditionUnknown)
-		st.Reason = "Reconciling"
+		st.Reason = fleetv1alpha1.ReasonReconciling
 		st.Message = fmt.Sprintf("member kro has evaluated generation %d, copy is at generation %d", o.ReadyObservedGeneration, o.Generation)
+	}
+	if o.Accepted() {
+		// The last revision this member's kro reported serving; kept
+		// across the next update until the member's verdict on it is in.
+		st.AcceptedHash = o.Hash
 	}
 	st.KroVersion = r.kroVersion(ctx, cl, member)
 	if prev.State != st.State || prev.Ready != st.Ready || prev.LastTransitionTime.IsZero() {
@@ -392,38 +399,27 @@ func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fle
 	return st
 }
 
-// removeFromMember takes the definition off one member unless hub-placed
-// instances of its kind still live there. It returns the member's status
-// entry to keep (when not gone), the blocker if any, why removal is still
-// pending otherwise, and gone=true when the member is settled.
+// removeFromMember takes the definition off one member unless instances of
+// its kind still live there — placed by the hub (its records) or created
+// directly on the member (listed there, since stock kro accepts them). It
+// returns the member's status entry to keep (when not gone), the blocker if
+// any, why removal is still pending otherwise, and gone=true when the
+// member is settled. It never removes from a member it cannot look at: an
+// unreachable member stays pending and is retried.
 func (r *DefinitionReconciler) removeFromMember(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, prev fleetv1alpha1.MemberDefinitionStatus, profile *clusterinventoryv1alpha1.ClusterProfile) (fleetv1alpha1.MemberDefinitionStatus, *BlockedMember, string, bool, error) {
 	log := ctrllog.FromContext(ctx)
 	member := prev.Name
 	st := prev
 	st.Applied = false
 
-	n, err := r.blockingInstances(ctx, frgd, member)
+	hubPlaced, tracked, err := r.blockingInstances(ctx, frgd, member)
 	if err != nil {
 		return st, nil, "", false, err
 	}
-	if n > 0 {
-		// Keep observing the copy while it is held, so the entry stays true.
-		if MemberHealthy(profile) {
-			if cl, err := r.Manager.GetCluster(ctx, multicluster.ClusterName(r.FleetNamespace+"/"+member)); err == nil {
-				copy := &unstructured.Unstructured{}
-				copy.SetGroupVersionKind(ResourceGraphDefinitionGVK)
-				if err := cl.GetClient().Get(ctx, types.NamespacedName{Name: frgd.Name}, copy); err == nil {
-					o := ObserveDefinition(copy)
-					st.State, st.Ready, st.Reason, st.Message = o.State, o.Ready, o.Reason, o.Message
-					st.AppliedHash, st.UID = o.Hash, o.UID
-					st.Applied = o.Hash == frgd.Status.SpecHash
-				}
-			}
-		}
-		return st, &BlockedMember{Name: member, Instances: n}, "", false, nil
-	}
-
 	if profile == nil {
+		if hubPlaced > 0 {
+			return st, &BlockedMember{Name: member, HubPlaced: hubPlaced}, "", false, nil
+		}
 		// Deregistered before removal: nothing can be done from here. There
 		// is no orphan ledger for definitions (a copy left on a member that
 		// never returns is harmless on its own); surfaced in the log only.
@@ -431,17 +427,46 @@ func (r *DefinitionReconciler) removeFromMember(ctx context.Context, frgd *fleet
 		return st, nil, "", true, nil
 	}
 	if !MemberHealthy(profile) {
+		if hubPlaced > 0 {
+			return st, &BlockedMember{Name: member, HubPlaced: hubPlaced}, "", false, nil
+		}
 		return st, nil, "member reported unhealthy by its cluster manager", false, nil
 	}
 	cl, err := r.Manager.GetCluster(ctx, multicluster.ClusterName(r.FleetNamespace+"/"+member))
 	if err != nil {
+		if hubPlaced > 0 {
+			return st, &BlockedMember{Name: member, HubPlaced: hubPlaced}, "", false, nil
+		}
 		return st, nil, "member not engaged (credentials or connectivity)", false, nil
 	}
-	tracked := []fleetv1alpha1.AppliedManifest{{
+
+	memberLocal, err := r.memberLocalInstances(ctx, cl, DefinitionKind(frgd), tracked)
+	if err != nil {
+		// Cannot tell what lives there: do not remove. Retried.
+		log.Error(err, "failed to list instances of the kind on the member; holding the definition", "member", member)
+		return st, nil, "could not list instances of the kind on the member: " + err.Error(), false, nil
+	}
+	if hubPlaced+memberLocal > 0 {
+		// Keep observing the copy while it is held, so the entry stays true.
+		copy := &unstructured.Unstructured{}
+		copy.SetGroupVersionKind(ResourceGraphDefinitionGVK)
+		if err := cl.GetClient().Get(ctx, types.NamespacedName{Name: frgd.Name}, copy); err == nil {
+			o := ObserveDefinition(copy)
+			st.State, st.Ready, st.Reason, st.Message = o.State, o.Ready, o.Reason, o.Message
+			st.AppliedHash, st.UID = o.Hash, o.UID
+			st.Applied = o.Hash == frgd.Status.SpecHash
+			if o.Accepted() {
+				st.AcceptedHash = o.Hash
+			}
+		}
+		return st, &BlockedMember{Name: member, HubPlaced: hubPlaced, MemberLocal: memberLocal}, "", false, nil
+	}
+
+	manifests := []fleetv1alpha1.AppliedManifest{{
 		ManifestIdentifier: fleetv1alpha1.ManifestIdentifier{Group: ResourceGraphDefinitionGVK.Group, Version: ResourceGraphDefinitionGVK.Version, Kind: ResourceGraphDefinitionGVK.Kind, Name: frgd.Name},
 		UID:                prev.UID,
 	}}
-	gone, err := deleteManifests(ctx, cl.GetClient(), frgd.Name, tracked)
+	gone, err := deleteManifests(ctx, cl.GetClient(), frgd.Name, manifests)
 	if err != nil {
 		return st, nil, "", false, err
 	}
@@ -453,24 +478,56 @@ func (r *DefinitionReconciler) removeFromMember(ctx context.Context, frgd *fleet
 
 // blockingInstances counts the hub-placed instances of this definition's
 // kind on one member: the AppliedManifestRecords for that member whose
-// tracked manifests include the kind. Removing the definition there would
-// make the member's kro drop the CRD and, with it, every instance.
-func (r *DefinitionReconciler) blockingInstances(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, member string) (int, error) {
+// tracked manifests include the kind. It also returns the namespace/name
+// of every such tracked instance, so what the member itself lists can be
+// told apart from what the hub placed. Removing the definition there would
+// make the member's kro shut down its controller for the kind, leaving
+// every instance unmanaged — or, with kro's --allow-crd-deletion, drop the
+// CRD and every instance with it.
+func (r *DefinitionReconciler) blockingInstances(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, member string) (int, map[types.NamespacedName]bool, error) {
 	gvk := DefinitionKind(frgd)
+	tracked := map[types.NamespacedName]bool{}
 	if gvk.Kind == "" {
-		return 0, nil
+		return 0, tracked, nil
 	}
 	list := &fleetv1alpha1.AppliedManifestRecordList{}
 	if err := r.Manager.GetLocalManager().GetClient().List(ctx, list, client.MatchingLabels{fleetv1alpha1.ClusterLabel: member}); err != nil {
-		return 0, fmt.Errorf("failed to list AppliedManifestRecords for %s: %w", member, err)
+		return 0, nil, fmt.Errorf("failed to list AppliedManifestRecords for %s: %w", member, err)
 	}
 	n := 0
 	for i := range list.Items {
-		if manifestsOfKind(&list.Items[i], gvk) > 0 {
-			n++
+		if manifestsOfKind(&list.Items[i], gvk) == 0 {
+			continue
+		}
+		n++
+		for _, m := range trackedManifests(&list.Items[i]) {
+			if m.Kind == gvk.Kind && m.Group == gvk.Group {
+				tracked[types.NamespacedName{Namespace: m.Namespace, Name: m.Name}] = true
+			}
 		}
 	}
-	return n, nil
+	return n, tracked, nil
+}
+
+// memberLocalInstances lists the instances of the definition's kind on a
+// member — uncached, the hub keeps no informer for this kind on every
+// member — and counts those no hub record tracks. A member that does not
+// serve the kind (no REST mapping, or the CRD is gone) has none; any other
+// error means the member cannot be looked at.
+func (r *DefinitionReconciler) memberLocalInstances(ctx context.Context, cl cluster.Cluster, gvk schema.GroupVersionKind, tracked map[types.NamespacedName]bool) (int, error) {
+	if gvk.Kind == "" {
+		return 0, nil
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+	err := cl.GetAPIReader().List(ctx, list)
+	switch {
+	case meta.IsNoMatchError(err) || apierrors.IsNotFound(err):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("failed to list %s on the member: %w", gvk.Kind, err)
+	}
+	return MemberLocalInstances(list, tracked), nil
 }
 
 // kroVersion reads the kro version a member runs off its kro Deployment

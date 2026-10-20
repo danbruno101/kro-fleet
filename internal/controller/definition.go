@@ -200,6 +200,13 @@ func (o ObservedDefinition) Fresh() bool {
 	return o.ReadyObservedGeneration == 0 || o.ReadyObservedGeneration >= o.Generation
 }
 
+// Accepted reports whether the member kro says it serves the revision the
+// copy is at: Active, Ready True, and that verdict is about the copy's own
+// generation.
+func (o ObservedDefinition) Accepted() bool {
+	return o.Fresh() && o.State == string(krov1alpha1.ResourceGraphDefinitionStateActive) && o.Ready == string(metav1.ConditionTrue)
+}
+
 // DefinitionTargets resolves which registered members a definition goes to:
 // none when distribution is disabled, else every member whose ClusterProfile
 // properties satisfy memberSelector (absent = all). Sorted.
@@ -218,10 +225,44 @@ func DefinitionTargets(frgd *fleetv1alpha1.FleetResourceGraphDefinition, profile
 	return out
 }
 
-// BlockedMember is one member whose definition cannot be removed yet.
+// BlockedMember is one member whose definition cannot be removed yet, with
+// the instances of its kind that block it split by who created them. The
+// guard reflects the member's reality, not the hub's ledger: stock kro
+// accepts an instance created directly on the member, and removing the
+// definition would leave that instance unmanaged (stock kro shuts down
+// its controller for the kind and, with --allow-crd-deletion, deletes
+// the generated CRD and the instance with it).
 type BlockedMember struct {
-	Name      string
-	Instances int
+	Name string
+	// HubPlaced is the number of instances the hub placed there: the
+	// AppliedManifestRecords for the member that track the kind.
+	HubPlaced int
+	// MemberLocal is the number of instances found on the member that no
+	// record tracks — created there directly, invisible to the hub's ledger.
+	MemberLocal int
+}
+
+// String renders the member for the Deleting condition message, e.g.
+// "member-2 (1 hub-placed, 2 member-local instance(s))".
+func (b BlockedMember) String() string {
+	return fmt.Sprintf("%s (%d hub-placed, %d member-local instance(s))", b.Name, b.HubPlaced, b.MemberLocal)
+}
+
+// MemberLocalInstances counts the instances on a member that no hub record
+// tracks: everything listed there of the definition's kind whose
+// namespace/name is not among the tracked manifests of that kind.
+func MemberLocalInstances(found *unstructured.UnstructuredList, tracked map[types.NamespacedName]bool) int {
+	if found == nil {
+		return 0
+	}
+	n := 0
+	for i := range found.Items {
+		key := types.NamespacedName{Namespace: found.Items[i].GetNamespace(), Name: found.Items[i].GetName()}
+		if !tracked[key] {
+			n++
+		}
+	}
+	return n
 }
 
 // DefinitionRollup is what the wrapper-level conditions are computed from.
@@ -304,10 +345,10 @@ func RollupDefinition(in DefinitionRollup) (distributed, accepted, deleting meta
 	case len(in.Blocked) > 0:
 		parts := make([]string, 0, len(in.Blocked))
 		for _, b := range in.Blocked {
-			parts = append(parts, fmt.Sprintf("%s (%d instance(s))", b.Name, b.Instances))
+			parts = append(parts, b.String())
 		}
 		deleting.Reason = fleetv1alpha1.ReasonBlockedByInstances
-		deleting.Message = "removal refused while hub-placed instances of this kind exist on: " + strings.Join(parts, ", ")
+		deleting.Message = "removal refused while instances of this kind exist on: " + strings.Join(parts, ", ")
 	case len(in.Removing) > 0:
 		deleting.Status, deleting.Reason = metav1.ConditionTrue, fleetv1alpha1.ReasonRemoving
 		deleting.Message = "removing from " + strings.Join(in.Removing, ", ")
@@ -315,11 +356,19 @@ func RollupDefinition(in DefinitionRollup) (distributed, accepted, deleting meta
 	return distributed, accepted, deleting, summary
 }
 
-// DefinitionGate decides whether a fleet instance may be placed on a member:
-// only when the definition for its kind exists on the hub and reports that
-// member accepted (current revision, Active, Ready). Otherwise it returns
-// why, in the definition's (i.e. the member kro's) own words.
-func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.GroupVersionKind, member string) (bool, string) {
+// DefinitionGate decides whether a fleet instance may be placed on a member.
+// Its question is "can this member's kro serve the kind", not "is this
+// member on the latest revision": a member passes when the definition for
+// the kind exists on the hub, targets the member, and the member's copy is
+// Serving (reported Active at SOME revision and has not rejected the
+// current one). A member serving an older revision while its kro evaluates
+// the new one passes with a note — "serving revision <old>; revision
+// <new> pending" — for the instance's status.clusters[] entry, so the
+// rollout is visible without flapping Placed on every definition edit. A
+// member that holds no copy, has never reported Active, explicitly
+// rejected the current revision, or is pending removal is blocked, with
+// why in the definition's (i.e. the member kro's) own words.
+func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.GroupVersionKind, member string) (ok bool, note string) {
 	if def == nil {
 		return false, fmt.Sprintf("no FleetResourceGraphDefinition for kind %s on the hub", gvk.Kind)
 	}
@@ -327,8 +376,15 @@ func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.
 		if m.Name != member {
 			continue
 		}
+		if m.Reason == fleetv1alpha1.ReasonNotDistributed {
+			// Not written yet, or on its way out: not a serving member.
+			return false, fmt.Sprintf("definition %s is not distributed to this member: %s", def.Name, m.Message)
+		}
 		if m.Accepted() {
 			return true, ""
+		}
+		if m.Serving() {
+			return true, fmt.Sprintf("serving revision %s of definition %s; revision %s pending", m.AcceptedHash, def.Name, def.Status.SpecHash)
 		}
 		why := fmt.Sprintf("definition %s is not Active on this member", def.Name)
 		switch {
@@ -337,10 +393,17 @@ func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.
 			if m.Message != "" {
 				why += ": " + m.Message
 			}
+		case m.AppliedHash == "":
+			why += ": the member holds no copy"
+		case m.AcceptedHash == "":
+			why += ": the member's kro has not reported it Active yet"
 		case !m.Applied:
 			why += fmt.Sprintf(": holds revision %q, hub is at %q", m.AppliedHash, def.Status.SpecHash)
 		case m.State != "":
 			why += ": state " + m.State
+		}
+		if m.Rejected() && m.AcceptedHash != "" {
+			why += fmt.Sprintf("; last accepted revision %s", m.AcceptedHash)
 		}
 		return false, why
 	}
