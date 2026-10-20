@@ -657,7 +657,11 @@ wait_for 300 "${ROLL} placed + Ready on all three (3/3)" placed_ready_is "$ROLL"
 placed_lt_before="$(hub get fgs "$ROLL" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].lastTransitionTime}')"
 member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=0 >/dev/null   # pause member-3's kro: it cannot evaluate the new revision
 gen_hash_old="$(frgd_hash "$GEN")"
-hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/schema/spec/rolloutProbe","value":"string | default=\"\""}]' >/dev/null
+# The probe is a change to a resource template (an annotation on the Service), never to
+# the schema: stock kro keeps the generated CRD when an RGD is deleted (allowCRDDeletion
+# is off by default) and refuses a later schema that drops a property as a breaking
+# change, so a schema-level probe could never be reverted or restored from config/.
+hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/resources/3/template/metadata/annotations","value":{"e2e.kro-fleet.io/rollout-probe":"1"}}]' >/dev/null
 wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" != '$gen_hash_old' ]"
 roll_hash="$(frgd_hash "$GEN")"
 wait_for 180 "member-1 and member-2 accept the new revision" bash -c "accepted_at $GEN $M1 $roll_hash && accepted_at $GEN $M2 $roll_hash"
@@ -670,11 +674,8 @@ echo "    member-3 entry: $(cluster_field "$ROLL" "$M3" message)"
 member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=1 >/dev/null
 wait_for 180 "member-3 accepts the new revision once its kro returns" all_accepted_at "$GEN" "$roll_hash" "$M1" "$M2" "$M3"
 wait_for 60 "${ROLL}'s member-3 entry no longer pending" bash -c "! cluster_field $ROLL $M3 message | grep -q 'revision $roll_hash pending'"
-# Revert the probe field so the definition matches config/fleet-rgd/ again: stock kro
-# keeps the generated CRD when an RGD is deleted (allowCRDDeletion is off by default),
-# and re-applying the original schema against a CRD that still has the field would be
-# refused as a breaking change ("Property rolloutProbe was removed").
-hub patch frgd "$GEN" --type=json -p '[{"op":"remove","path":"/spec/resourceGraphDefinition/schema/spec/rolloutProbe"}]' >/dev/null
+# Revert the probe so the definition matches config/fleet-rgd/ again.
+hub patch frgd "$GEN" --type=json -p '[{"op":"remove","path":"/spec/resourceGraphDefinition/resources/3/template/metadata/annotations"}]' >/dev/null
 wait_for 60 "hub specHash back to ${gen_hash_old}" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" = '$gen_hash_old' ]"
 wait_for 180 "all three members Active on the reverted revision" all_accepted_at "$GEN" "$gen_hash_old" "$M1" "$M2" "$M3"
 
