@@ -281,7 +281,10 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		}
 		// An unhealthy member is not written to anyway, and applyToMember
 		// says so; the gate is about what a reachable member's kro serves.
-		if ok, why := DefinitionGate(def, GenAIServiceGVK, m.Name); !ok && MemberHealthy(profileMap[m.Name]) {
+		// A member serving an older revision of the definition passes with
+		// a note (the new revision is pending there), carried on its entry.
+		ok, why := DefinitionGate(def, GenAIServiceGVK, m.Name)
+		if !ok && MemberHealthy(profileMap[m.Name]) {
 			// Never silently skipped: the member is reported with the
 			// definition's own reason. A copy placed earlier is held as is
 			// (still observed, not converged); a member never placed gets
@@ -314,6 +317,11 @@ func (r *FleetReconciler) Reconcile(ctx context.Context, req mcreconcile.Request
 		st, err := r.applyToMember(ctx, fgs, rec, m, desired, assigned, profileMap[m.Name])
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if ok && why != "" {
+			// The definition's new revision is pending on this member; the
+			// placed copy is served by the revision its kro accepted.
+			st.Message = strings.TrimSuffix(why+"; "+st.Message, "; ")
 		}
 		if st.Ready {
 			readyClusters++

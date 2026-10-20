@@ -354,7 +354,7 @@ func (r *DefinitionReconciler) finalize(ctx context.Context, frgd *fleetv1alpha1
 // (the freshest view of the copy). Everything reported is observed.
 func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fleetv1alpha1.FleetResourceGraphDefinition, desired *unstructured.Unstructured, hash, member string, profile *clusterinventoryv1alpha1.ClusterProfile, prev fleetv1alpha1.MemberDefinitionStatus) fleetv1alpha1.MemberDefinitionStatus {
 	log := ctrllog.FromContext(ctx)
-	st := fleetv1alpha1.MemberDefinitionStatus{Name: member, AppliedHash: prev.AppliedHash, UID: prev.UID, KroVersion: prev.KroVersion, LastTransitionTime: prev.LastTransitionTime}
+	st := fleetv1alpha1.MemberDefinitionStatus{Name: member, AppliedHash: prev.AppliedHash, AcceptedHash: prev.AcceptedHash, UID: prev.UID, KroVersion: prev.KroVersion, LastTransitionTime: prev.LastTransitionTime}
 
 	st.Applied = prev.AppliedHash == hash // as last observed, until the member answers again
 	if !MemberHealthy(profile) {
@@ -386,6 +386,11 @@ func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fle
 		st.Ready = string(metav1.ConditionUnknown)
 		st.Reason = fleetv1alpha1.ReasonReconciling
 		st.Message = fmt.Sprintf("member kro has evaluated generation %d, copy is at generation %d", o.ReadyObservedGeneration, o.Generation)
+	}
+	if o.Accepted() {
+		// The last revision this member's kro reported serving; kept
+		// across the next update until the member's verdict on it is in.
+		st.AcceptedHash = o.Hash
 	}
 	st.KroVersion = r.kroVersion(ctx, cl, member)
 	if prev.State != st.State || prev.Ready != st.Ready || prev.LastTransitionTime.IsZero() {
@@ -450,6 +455,9 @@ func (r *DefinitionReconciler) removeFromMember(ctx context.Context, frgd *fleet
 			st.State, st.Ready, st.Reason, st.Message = o.State, o.Ready, o.Reason, o.Message
 			st.AppliedHash, st.UID = o.Hash, o.UID
 			st.Applied = o.Hash == frgd.Status.SpecHash
+			if o.Accepted() {
+				st.AcceptedHash = o.Hash
+			}
 		}
 		return st, &BlockedMember{Name: member, HubPlaced: hubPlaced, MemberLocal: memberLocal}, "", false, nil
 	}

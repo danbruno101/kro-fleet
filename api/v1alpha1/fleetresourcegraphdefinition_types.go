@@ -191,6 +191,15 @@ type MemberDefinitionStatus struct {
 	// not engaged right now).
 	Applied bool `json:"applied"`
 
+	// AcceptedHash is the hash of the last revision this member's kro
+	// reported Active and Ready for the copy's own generation. It is kept
+	// across a spec update until the member's kro evaluates the new
+	// revision, so "does this member's kro serve the kind" (Serving) can be
+	// answered while "is it on the current revision" (Accepted) cannot yet.
+	// Empty when the member has never reported the definition Active.
+	// +optional
+	AcceptedHash string `json:"acceptedHash,omitempty"`
+
 	// UID of the member's copy, the delete precondition so a same-named
 	// definition someone else created there is never removed.
 	// +optional
@@ -228,10 +237,41 @@ type MemberDefinitionStatus struct {
 	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
-// Accepted reports whether the member holds the current revision and its
-// own kro says it is serving: applied, state Active, Ready True.
+// Accepted is the STRICT, rollout-side predicate: the member holds the
+// CURRENT revision and its own kro says it is serving it — applied, state
+// Active, Ready True (for the copy's own generation; a stale verdict is
+// reported Unknown/Reconciling and does not count). It feeds the wrapper's
+// Accepted condition and summary, which answer "has every member taken
+// the revision the hub holds". It is not the placement gate's question —
+// see Serving.
 func (m MemberDefinitionStatus) Accepted() bool {
 	return m.Applied && m.State == string(krov1alpha1.ResourceGraphDefinitionStateActive) && m.Ready == string(metav1.ConditionTrue)
+}
+
+// Rejected reports that the member's kro has evaluated the CURRENT
+// revision and refused it: the copy is at the current hash and the fresh
+// verdict is negative (Ready False, or any verdict other than Active and
+// Ready True — e.g. GraphAccepted=False for this generation). A copy whose
+// verdict is still Unknown (its kro has not evaluated the generation yet)
+// is not rejected; neither is a member that holds an older revision.
+func (m MemberDefinitionStatus) Rejected() bool {
+	if !m.Applied || m.Ready == "" || m.Ready == string(metav1.ConditionUnknown) {
+		return false
+	}
+	return m.Ready != string(metav1.ConditionTrue) || m.State != string(krov1alpha1.ResourceGraphDefinitionStateActive)
+}
+
+// Serving is the LENIENT, placement-side predicate: can this member's kro
+// serve the kind? True when the member holds a copy, its kro has reported
+// SOME revision Active (acceptedHash is set), and it has not rejected the
+// current one. A member still serving an older revision while its kro
+// evaluates the new one passes — Placed is a placement signal, not a
+// rollout signal; a member that holds no copy, never reported Active, or
+// explicitly rejected the current revision does not. Accepted implies
+// Serving; the converse holds only between a spec update and the
+// member's verdict on it.
+func (m MemberDefinitionStatus) Serving() bool {
+	return m.AppliedHash != "" && m.AcceptedHash != "" && !m.Rejected()
 }
 
 // DefinitionSummary counts members.

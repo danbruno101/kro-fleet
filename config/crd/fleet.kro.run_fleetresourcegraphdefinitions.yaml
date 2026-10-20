@@ -484,6 +484,15 @@ spec:
                   description: MemberDefinitionStatus is one member's view of the
                     definition.
                   properties:
+                    acceptedHash:
+                      description: |-
+                        AcceptedHash is the hash of the last revision this member's kro
+                        reported Active and Ready for the copy's own generation. It is kept
+                        across a spec update until the member's kro evaluates the new
+                        revision, so "does this member's kro serve the kind" (Serving) can be
+                        answered while "is it on the current revision" (Accepted) cannot yet.
+                        Empty when the member has never reported the definition Active.
+                      type: string
                     applied:
                       description: |-
                         Applied is true when appliedHash equals status.specHash: the member

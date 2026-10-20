@@ -39,7 +39,9 @@
 #  16. a late-joining member receives every applicable definition on
 #      registration — before any instance is placed on it
 #  17. a spec update propagates: the hash changes on the hub and on every
-#      member's copy, and every member accepts the new revision
+#      member's copy, and every member accepts the new revision — and while
+#      a member has not yet evaluated it, instances placed there stay Placed
+#      (serving the old revision, the new one reported pending)
 #  18. placement gate: an instance is not placed on a member until the
 #      definition for its kind reports that member Active; the member is
 #      reported with reason RGDNotReady, never silently dropped
@@ -49,7 +51,8 @@
 #      own once the instances are gone
 #  20. version skew: a definition one member cannot accept is reported with
 #      that member's own reason, the others Active, Accepted=False on the hub,
-#      and an instance of that kind lands only on the accepting members
+#      a new instance of that kind lands only on the accepting members, and a
+#      copy placed there before the rejection is held as is
 #  21. the deletion guard sees the member's reality, not the hub's ledger: an
 #      instance created directly on a member (stock kro accepts it) blocks
 #      the definition's removal there as "member-local", and releases it
@@ -587,48 +590,7 @@ hub get frgd "$ECHO" >/dev/null 2>&1 || apply_echo_definition   # E2E_FROM >= 13
 wait_for 180 "${ECHO}: MEMBERS 3/3" frgd_members_is "$ECHO" 3/3
 wait_for 60 "${ECHO} Accepted on all three members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
 
-echo "### criterion 14: distribution.enabled=false removes the definition from every member"
-hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":false}}}' >/dev/null
-for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m" member "$m" get rgd "$ECHO"; done
-wait_for 60 "Distributed=False/DistributionDisabled, MEMBERS 0/0" bash -c "frgd_reason_is $ECHO Distributed DistributionDisabled && frgd_members_is $ECHO 0/0"
-[ -z "$(hub get frgd "$ECHO" -o jsonpath='{.status.members[*].name}')" ] || fail "status.members[] must be empty once removed everywhere"
-hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":true}}}' >/dev/null
-wait_for 180 "enabled again: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
-
-echo "### criterion 15: memberSelector narrows distribution to the matching member (aks persona) and removes it elsewhere"
-hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":{"matchProperties":{"cloud.example.com":"aks"}}}}}' >/dev/null
-wait_gone 120 "${ECHO} removed from member-1 (gke)" member "$M1" get rgd "$ECHO"
-wait_gone 120 "${ECHO} removed from member-3 (eks)" member "$M3" get rgd "$ECHO"
-member "$M2" get rgd "$ECHO" >/dev/null || fail "the selected member must keep the definition"
-wait_for 60 "MEMBERS 1/1, only member-2 listed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.summary.members}/{.status.members[*].name}')\" = '1/1/$M2' ]"
-hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":null}}}' >/dev/null
-wait_for 180 "selector removed: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
-
-echo "### criterion 17: a spec update propagates — the hash changes on the hub and on every member's copy, every member accepts the new revision"
-old_hash="$(frgd_hash "$ECHO")"
-hub patch frgd "$ECHO" --type=merge -p '{"spec":{"resourceGraphDefinition":{"schema":{"spec":{"message":"string | default=\"hello\"","extra":"string | default=\"\""}}}}}' >/dev/null
-wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.specHash}')\" != '$old_hash' ]"
-new_hash="$(frgd_hash "$ECHO")"
-wait_for 180 "new revision ${new_hash} held and Active on all three members" all_accepted_at "$ECHO" "$new_hash" "$M1" "$M2" "$M3"
-hub delete frgd "$ECHO" --timeout=120s >/dev/null
-for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m on delete (no instances: guard passes)" member "$m" get rgd "$ECHO"; done
-
-echo "### criterion 20: version skew — the GenAIService definition gains a resource whose CRD only member-1 and member-2 have; member-3 rejects it with its own reason"
-member "$M1" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
-member "$M2" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
-gen_hash_before="$(frgd_hash "$GEN")"
-hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/resources/-","value":{"id":"skewMarker","template":{"apiVersion":"skew.e2e.example.com/v1","kind":"SkewMarker","metadata":{"name":"${schema.spec.name}-skew"},"spec":{"note":"version skew probe"}}}}]' >/dev/null
-wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" != '$gen_hash_before' ]"
-skew_hash="$(frgd_hash "$GEN")"
-m3_rejects() { [ "$(frgd_member "$GEN" "$M3" appliedHash)" = "$skew_hash" ] && [ "$(frgd_member "$GEN" "$M3" state)" = "Inactive" ] && [ -n "$(frgd_member "$GEN" "$M3" reason)" ]; }
-wait_for 180 "member-3 holds the new revision and its kro reports it Inactive with a reason" m3_rejects
-echo "    member-3 says: $(frgd_member "$GEN" "$M3" reason): $(frgd_member "$GEN" "$M3" message)"
-echo "$(frgd_member "$GEN" "$M3" reason) $(frgd_member "$GEN" "$M3" message)" | grep -qi "skewmarker\|skew.e2e.example.com" || fail "member-3's reason/message must be its kro's own words about the unknown kind"
-[ "$(member_rgd_state "$M3" "$GEN")" = "Inactive" ] || fail "the hub must report exactly what member-3's kro reports"
-wait_for 180 "member-1 and member-2 accept the new revision" bash -c "accepted_at $GEN $M1 $skew_hash && accepted_at $GEN $M2 $skew_hash"
-wait_for 60 "Accepted=False naming member-3; Distributed=True (every member holds the hash); MEMBERS 2/3" bash -c "frgd_is $GEN Accepted False && frgd_is $GEN Distributed True && frgd_members_is $GEN 2/3"
-echo "$(frgd_cond "$GEN" Accepted message)" | grep -q "$M3" || fail "Accepted=False must name the rejecting member: $(frgd_cond "$GEN" Accepted message)"
-SKEW=skew-llm
+# --- instance helpers for the definition scenarios
 apply_mock_instance() {  # apply_mock_instance <name>: replicated to every tier=prod member, Ready with one cluster
   cat <<EOF | hub apply -f - >/dev/null
 apiVersion: fleet.kro.run/v1alpha1
@@ -657,6 +619,74 @@ summary_of()   { hub get fgs "$1" -n "$WORKLOAD_NS" -o jsonpath="{.status.summar
 cluster_field(){ hub get fgs "$1" -n "$WORKLOAD_NS" -o jsonpath="{.status.clusters[?(@.name=='$2')].$3}" 2>/dev/null; }
 placed_ready_is() { [ "$(summary_of "$1" placed)" = "$2" ] && [ "$(summary_of "$1" ready)" = "$3" ]; }
 export -f summary_of cluster_field placed_ready_is placed_reason_of ready_status_of
+
+echo "### criterion 14: distribution.enabled=false removes the definition from every member"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":false}}}' >/dev/null
+for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m" member "$m" get rgd "$ECHO"; done
+wait_for 60 "Distributed=False/DistributionDisabled, MEMBERS 0/0" bash -c "frgd_reason_is $ECHO Distributed DistributionDisabled && frgd_members_is $ECHO 0/0"
+[ -z "$(hub get frgd "$ECHO" -o jsonpath='{.status.members[*].name}')" ] || fail "status.members[] must be empty once removed everywhere"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":true}}}' >/dev/null
+wait_for 180 "enabled again: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+
+echo "### criterion 15: memberSelector narrows distribution to the matching member (aks persona) and removes it elsewhere"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":{"matchProperties":{"cloud.example.com":"aks"}}}}}' >/dev/null
+wait_gone 120 "${ECHO} removed from member-1 (gke)" member "$M1" get rgd "$ECHO"
+wait_gone 120 "${ECHO} removed from member-3 (eks)" member "$M3" get rgd "$ECHO"
+member "$M2" get rgd "$ECHO" >/dev/null || fail "the selected member must keep the definition"
+wait_for 60 "MEMBERS 1/1, only member-2 listed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.summary.members}/{.status.members[*].name}')\" = '1/1/$M2' ]"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":null}}}' >/dev/null
+wait_for 180 "selector removed: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+
+echo "### criterion 17: a spec update propagates — the hash changes on the hub and on every member's copy, every member accepts the new revision"
+old_hash="$(frgd_hash "$ECHO")"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"resourceGraphDefinition":{"schema":{"spec":{"message":"string | default=\"hello\"","extra":"string | default=\"\""}}}}}' >/dev/null
+wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.specHash}')\" != '$old_hash' ]"
+new_hash="$(frgd_hash "$ECHO")"
+wait_for 180 "new revision ${new_hash} held and Active on all three members" all_accepted_at "$ECHO" "$new_hash" "$M1" "$M2" "$M3"
+hub delete frgd "$ECHO" --timeout=120s >/dev/null
+for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m on delete (no instances: guard passes)" member "$m" get rgd "$ECHO"; done
+
+echo "### criterion 17 (gate during the update): with kro paused on member-3, editing the GenAIService definition keeps the placed instance Placed=True there — serving the old revision, the new one pending — and member-3 accepts it once its kro returns"
+ROLL=rollout-llm                      # placed on all three before the edit; reused by criterion 20 as the previously placed copy
+apply_mock_instance "$ROLL"
+wait_for 300 "${ROLL} placed + Ready on all three (3/3)" placed_ready_is "$ROLL" 3 3
+placed_lt_before="$(hub get fgs "$ROLL" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].lastTransitionTime}')"
+member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=0 >/dev/null   # pause member-3's kro: it cannot evaluate the new revision
+gen_hash_old="$(frgd_hash "$GEN")"
+hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/schema/spec/rolloutProbe","value":"string | default=\"\""}]' >/dev/null
+wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" != '$gen_hash_old' ]"
+roll_hash="$(frgd_hash "$GEN")"
+wait_for 180 "member-1 and member-2 accept the new revision" bash -c "accepted_at $GEN $M1 $roll_hash && accepted_at $GEN $M2 $roll_hash"
+wait_for 60 "member-3 holds ${roll_hash}, Ready Unknown/Reconciling, acceptedHash still ${gen_hash_old}" bash -c "[ \"\$(frgd_member $GEN $M3 appliedHash)\" = '$roll_hash' ] && [ \"\$(frgd_member $GEN $M3 ready)\" = Unknown ] && [ \"\$(frgd_member $GEN $M3 reason)\" = Reconciling ] && [ \"\$(frgd_member $GEN $M3 acceptedHash)\" = '$gen_hash_old' ]"
+frgd_is "$GEN" Accepted False || fail "Accepted stays strict: member-3 has not taken the current revision"
+wait_for 60 "${ROLL} stays Placed=True on all three; member-3's entry says the new revision is pending" bash -c "placed_ready_is $ROLL 3 3 && [ \"\$(placed_reason_of $ROLL)\" = Placed ] && cluster_field $ROLL $M3 message | grep -q 'serving revision $gen_hash_old of definition $GEN; revision $roll_hash pending'"
+[ "$(hub get fgs "$ROLL" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].lastTransitionTime}')" = "$placed_lt_before" ] || fail "Placed must not flap during a definition update (lastTransitionTime changed)"
+[ -z "$(cluster_field "$ROLL" "$M3" reason)" ] || fail "a member serving an older revision is placed, not RGDNotReady: got '$(cluster_field "$ROLL" "$M3" reason)'"
+echo "    member-3 entry: $(cluster_field "$ROLL" "$M3" message)"
+member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=1 >/dev/null
+wait_for 180 "member-3 accepts the new revision once its kro returns" all_accepted_at "$GEN" "$roll_hash" "$M1" "$M2" "$M3"
+wait_for 60 "${ROLL}'s member-3 entry no longer pending" bash -c "! cluster_field $ROLL $M3 message | grep -q 'revision $roll_hash pending'"
+
+echo "### criterion 20: version skew — the GenAIService definition gains a resource whose CRD only member-1 and member-2 have; member-3 rejects it with its own reason"
+member "$M1" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
+member "$M2" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
+gen_hash_before="$(frgd_hash "$GEN")"
+hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/resources/-","value":{"id":"skewMarker","template":{"apiVersion":"skew.e2e.example.com/v1","kind":"SkewMarker","metadata":{"name":"${schema.spec.name}-skew"},"spec":{"note":"version skew probe"}}}}]' >/dev/null
+wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" != '$gen_hash_before' ]"
+skew_hash="$(frgd_hash "$GEN")"
+m3_rejects() { [ "$(frgd_member "$GEN" "$M3" appliedHash)" = "$skew_hash" ] && [ "$(frgd_member "$GEN" "$M3" state)" = "Inactive" ] && [ -n "$(frgd_member "$GEN" "$M3" reason)" ]; }
+wait_for 180 "member-3 holds the new revision and its kro reports it Inactive with a reason" m3_rejects
+echo "    member-3 says: $(frgd_member "$GEN" "$M3" reason): $(frgd_member "$GEN" "$M3" message)"
+wait_for 120 "${ROLL} (placed before the skew) is held as is on member-3: entry RGDNotReady with the rejection, Placed stays True (3/3)" bash -c "[ \"\$(cluster_field $ROLL $M3 reason)\" = RGDNotReady ] && cluster_field $ROLL $M3 message | grep -q 'holding the placed copy as is' && [ \"\$(placed_reason_of $ROLL)\" = Placed ] && placed_ready_is $ROLL 3 3"
+echo "$(cluster_field "$ROLL" "$M3" message)" | grep -q "last accepted revision $gen_hash_before" || fail "an explicit rejection must block and name the revision member-3 last accepted: $(cluster_field "$ROLL" "$M3" message)"
+member "$M3" get genaiservice "$ROLL" -n "$WORKLOAD_NS" >/dev/null || fail "the previously placed copy must be held on the rejecting member, not removed"
+echo "    ok: explicit rejection blocks; ${ROLL}'s copy on member-3 held as is"
+echo "$(frgd_member "$GEN" "$M3" reason) $(frgd_member "$GEN" "$M3" message)" | grep -qi "skewmarker\|skew.e2e.example.com" || fail "member-3's reason/message must be its kro's own words about the unknown kind"
+[ "$(member_rgd_state "$M3" "$GEN")" = "Inactive" ] || fail "the hub must report exactly what member-3's kro reports"
+wait_for 180 "member-1 and member-2 accept the new revision" bash -c "accepted_at $GEN $M1 $skew_hash && accepted_at $GEN $M2 $skew_hash"
+wait_for 60 "Accepted=False naming member-3; Distributed=True (every member holds the hash); MEMBERS 2/3" bash -c "frgd_is $GEN Accepted False && frgd_is $GEN Distributed True && frgd_members_is $GEN 2/3"
+echo "$(frgd_cond "$GEN" Accepted message)" | grep -q "$M3" || fail "Accepted=False must name the rejecting member: $(frgd_cond "$GEN" Accepted message)"
+SKEW=skew-llm
 apply_mock_instance "$SKEW"
 wait_for 300 "${SKEW} placed on the two accepting members only, both Ready (summary placed=2 ready=2)" placed_ready_is "$SKEW" 2 2
 [ "$(cluster_field "$SKEW" "$M3" reason)" = "RGDNotReady" ] || fail "member-3 must be reported in status.clusters[] with reason RGDNotReady, got '$(cluster_field "$SKEW" "$M3" reason)'"
@@ -671,6 +701,8 @@ hub patch frgd "$GEN" --type=json -p '[{"op":"remove","path":"/spec/resourceGrap
 wait_for 60 "hub specHash back to ${gen_hash_before}" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" = '$gen_hash_before' ]"
 wait_for 180 "all three members Active on the reverted revision" all_accepted_at "$GEN" "$gen_hash_before" "$M1" "$M2" "$M3"
 wait_for 300 "${SKEW} now placed + Ready on all three (3/3), Placed=True" bash -c "placed_ready_is $SKEW 3 3 && [ \"\$(placed_reason_of $SKEW)\" = Placed ]"
+wait_for 120 "${ROLL}'s held copy on member-3 is converged again (no RGDNotReady)" bash -c "[ -z \"\$(cluster_field $ROLL $M3 reason)\" ] && placed_ready_is $ROLL 3 3"
+hub delete fgs "$ROLL" -n "$WORKLOAD_NS" --timeout=180s >/dev/null
 member "$M1" delete -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" --ignore-not-found >/dev/null
 member "$M2" delete -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" --ignore-not-found >/dev/null
 

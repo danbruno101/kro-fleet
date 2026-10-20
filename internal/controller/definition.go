@@ -200,6 +200,13 @@ func (o ObservedDefinition) Fresh() bool {
 	return o.ReadyObservedGeneration == 0 || o.ReadyObservedGeneration >= o.Generation
 }
 
+// Accepted reports whether the member kro says it serves the revision the
+// copy is at: Active, Ready True, and that verdict is about the copy's own
+// generation.
+func (o ObservedDefinition) Accepted() bool {
+	return o.Fresh() && o.State == string(krov1alpha1.ResourceGraphDefinitionStateActive) && o.Ready == string(metav1.ConditionTrue)
+}
+
 // DefinitionTargets resolves which registered members a definition goes to:
 // none when distribution is disabled, else every member whose ClusterProfile
 // properties satisfy memberSelector (absent = all). Sorted.
@@ -347,11 +354,19 @@ func RollupDefinition(in DefinitionRollup) (distributed, accepted, deleting meta
 	return distributed, accepted, deleting, summary
 }
 
-// DefinitionGate decides whether a fleet instance may be placed on a member:
-// only when the definition for its kind exists on the hub and reports that
-// member accepted (current revision, Active, Ready). Otherwise it returns
-// why, in the definition's (i.e. the member kro's) own words.
-func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.GroupVersionKind, member string) (bool, string) {
+// DefinitionGate decides whether a fleet instance may be placed on a member.
+// Its question is "can this member's kro serve the kind", not "is this
+// member on the latest revision": a member passes when the definition for
+// the kind exists on the hub, targets the member, and the member's copy is
+// Serving (reported Active at SOME revision and has not rejected the
+// current one). A member serving an older revision while its kro evaluates
+// the new one passes with a note — "serving revision <old>; revision
+// <new> pending" — for the instance's status.clusters[] entry, so the
+// rollout is visible without flapping Placed on every definition edit. A
+// member that holds no copy, has never reported Active, explicitly
+// rejected the current revision, or is pending removal is blocked, with
+// why in the definition's (i.e. the member kro's) own words.
+func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.GroupVersionKind, member string) (ok bool, note string) {
 	if def == nil {
 		return false, fmt.Sprintf("no FleetResourceGraphDefinition for kind %s on the hub", gvk.Kind)
 	}
@@ -359,8 +374,15 @@ func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.
 		if m.Name != member {
 			continue
 		}
+		if m.Reason == fleetv1alpha1.ReasonNotDistributed {
+			// Not written yet, or on its way out: not a serving member.
+			return false, fmt.Sprintf("definition %s is not distributed to this member: %s", def.Name, m.Message)
+		}
 		if m.Accepted() {
 			return true, ""
+		}
+		if m.Serving() {
+			return true, fmt.Sprintf("serving revision %s of definition %s; revision %s pending", m.AcceptedHash, def.Name, def.Status.SpecHash)
 		}
 		why := fmt.Sprintf("definition %s is not Active on this member", def.Name)
 		switch {
@@ -369,10 +391,17 @@ func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.
 			if m.Message != "" {
 				why += ": " + m.Message
 			}
+		case m.AppliedHash == "":
+			why += ": the member holds no copy"
+		case m.AcceptedHash == "":
+			why += ": the member's kro has not reported it Active yet"
 		case !m.Applied:
 			why += fmt.Sprintf(": holds revision %q, hub is at %q", m.AppliedHash, def.Status.SpecHash)
 		case m.State != "":
 			why += ": state " + m.State
+		}
+		if m.Rejected() && m.AcceptedHash != "" {
+			why += fmt.Sprintf("; last accepted revision %s", m.AcceptedHash)
 		}
 		return false, why
 	}

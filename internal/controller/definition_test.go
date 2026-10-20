@@ -281,24 +281,88 @@ func TestDefinitionGate(t *testing.T) {
 	}
 	d := definition("genaiservice.kro.run", "GenAIService")
 	d.Status.SpecHash = "h2"
-	rej := member("m3", true, "Inactive", "False", "GraphAccepted/InvalidResourceGraph")
-	rej.Message = "no matches for kind SkewMarker"
-	d.Status.Members = []fleetv1alpha1.MemberDefinitionStatus{
-		member("m1", true, "Active", "True", ""),
-		{Name: "m2", Applied: false, AppliedHash: "h1", State: "Active", Ready: "True"},
-		rej,
+	accepted := member("m1", true, "Active", "True", "")
+	accepted.AppliedHash, accepted.AcceptedHash = "h2", "h2"
+	// Still on h1 (the apply of h2 has not landed), its kro serving h1.
+	staleActive := fleetv1alpha1.MemberDefinitionStatus{Name: "m2", Applied: false, AppliedHash: "h1", AcceptedHash: "h1", State: "Active", Ready: "True"}
+	// Holds h2, its kro evaluated it and refused; h1 was accepted before.
+	rejected := member("m3", true, "Inactive", "False", "GraphAccepted/InvalidResourceGraph")
+	rejected.Message = "no matches for kind SkewMarker"
+	rejected.AppliedHash, rejected.AcceptedHash = "h2", "h1"
+	// Holds h2, its kro has not reported anything yet: never Active.
+	neverActive := fleetv1alpha1.MemberDefinitionStatus{Name: "m5", Applied: true, AppliedHash: "h2"}
+	// Holds h2, its kro has not evaluated that generation yet (Unknown).
+	pending := member("m6", true, "Active", "Unknown", fleetv1alpha1.ReasonReconciling)
+	pending.Message = "member kro has evaluated generation 1, copy is at generation 2"
+	pending.AppliedHash, pending.AcceptedHash = "h2", "h1"
+	// Serving h1 but on its way out (deselected): not a placement target.
+	removing := fleetv1alpha1.MemberDefinitionStatus{Name: "m7", Applied: false, AppliedHash: "h1", AcceptedHash: "h1", State: "Active", Ready: "True", Reason: fleetv1alpha1.ReasonNotDistributed, Message: "pending removal: the copy is still terminating on the member"}
+	d.Status.Members = []fleetv1alpha1.MemberDefinitionStatus{accepted, staleActive, rejected, neverActive, pending, removing}
+
+	t.Run("accepted member passes without a note", func(t *testing.T) {
+		if ok, note := DefinitionGate(d, gvk, "m1"); !ok || note != "" {
+			t.Fatalf("accepted member must pass cleanly: %v %q", ok, note)
+		}
+	})
+	t.Run("stale-Active passes: serving beats current", func(t *testing.T) {
+		ok, note := DefinitionGate(d, gvk, "m2")
+		if !ok || note != "serving revision h1 of definition genaiservice.kro.run; revision h2 pending" {
+			t.Fatalf("a member serving an older revision must pass with the pending note: %v %q", ok, note)
+		}
+	})
+	t.Run("explicit rejection of the new revision blocks", func(t *testing.T) {
+		ok, why := DefinitionGate(d, gvk, "m3")
+		if ok || !strings.Contains(why, "GraphAccepted/InvalidResourceGraph: no matches for kind SkewMarker") || !strings.Contains(why, "last accepted revision h1") {
+			t.Fatalf("rejecting member must block with its own reason and the revision it last accepted: %v %q", ok, why)
+		}
+	})
+	t.Run("never-Active blocks", func(t *testing.T) {
+		if ok, why := DefinitionGate(d, gvk, "m5"); ok || !strings.Contains(why, "has not reported it Active yet") {
+			t.Fatalf("a member whose kro never reported Active must block: %v %q", ok, why)
+		}
+	})
+	t.Run("Unknown after an update passes with the pending message", func(t *testing.T) {
+		ok, note := DefinitionGate(d, gvk, "m6")
+		if !ok || !strings.Contains(note, "serving revision h1") || !strings.Contains(note, "revision h2 pending") {
+			t.Fatalf("an unevaluated new revision must not close the gate: %v %q", ok, note)
+		}
+	})
+	t.Run("pending removal blocks even while serving", func(t *testing.T) {
+		if ok, why := DefinitionGate(d, gvk, "m7"); ok || !strings.Contains(why, "not distributed to this member: pending removal") {
+			t.Fatalf("a member on its way out is not a target: %v %q", ok, why)
+		}
+	})
+	t.Run("untargeted member blocks", func(t *testing.T) {
+		if ok, why := DefinitionGate(d, gvk, "m4"); ok || !strings.Contains(why, "not distributed to this member") {
+			t.Fatalf("untargeted member must not pass: %v %q", ok, why)
+		}
+	})
+}
+
+func TestMemberDefinitionStatusPredicates(t *testing.T) {
+	cases := []struct {
+		name                        string
+		m                           fleetv1alpha1.MemberDefinitionStatus
+		accepted, rejected, serving bool
+	}{
+		{"current and Active", fleetv1alpha1.MemberDefinitionStatus{Applied: true, AppliedHash: "h2", AcceptedHash: "h2", State: "Active", Ready: "True"}, true, false, true},
+		{"older revision still Active", fleetv1alpha1.MemberDefinitionStatus{Applied: false, AppliedHash: "h1", AcceptedHash: "h1", State: "Active", Ready: "True"}, false, false, true},
+		{"new revision not yet evaluated", fleetv1alpha1.MemberDefinitionStatus{Applied: true, AppliedHash: "h2", AcceptedHash: "h1", State: "Active", Ready: "Unknown"}, false, false, true},
+		{"new revision rejected", fleetv1alpha1.MemberDefinitionStatus{Applied: true, AppliedHash: "h2", AcceptedHash: "h1", State: "Inactive", Ready: "False"}, false, true, false},
+		{"never Active", fleetv1alpha1.MemberDefinitionStatus{Applied: true, AppliedHash: "h2"}, false, false, false},
+		{"no copy", fleetv1alpha1.MemberDefinitionStatus{AcceptedHash: "h1"}, false, false, false},
+		{"not engaged, served before", fleetv1alpha1.MemberDefinitionStatus{Applied: false, AppliedHash: "h1", AcceptedHash: "h1", Reason: fleetv1alpha1.ReasonMemberNotEngaged}, false, false, true},
 	}
-	if ok, _ := DefinitionGate(d, gvk, "m1"); !ok {
-		t.Fatal("accepted member must pass")
-	}
-	if ok, why := DefinitionGate(d, gvk, "m2"); ok || !strings.Contains(why, `holds revision "h1", hub is at "h2"`) {
-		t.Fatalf("stale revision must not pass: %v %q", ok, why)
-	}
-	if ok, why := DefinitionGate(d, gvk, "m3"); ok || !strings.Contains(why, "GraphAccepted/InvalidResourceGraph: no matches for kind SkewMarker") {
-		t.Fatalf("rejecting member must carry its own reason: %v %q", ok, why)
-	}
-	if ok, why := DefinitionGate(d, gvk, "m4"); ok || !strings.Contains(why, "not distributed to this member") {
-		t.Fatalf("untargeted member must not pass: %v %q", ok, why)
+	for _, c := range cases {
+		if got := c.m.Accepted(); got != c.accepted {
+			t.Errorf("%s: Accepted() = %v, want %v", c.name, got, c.accepted)
+		}
+		if got := c.m.Rejected(); got != c.rejected {
+			t.Errorf("%s: Rejected() = %v, want %v", c.name, got, c.rejected)
+		}
+		if got := c.m.Serving(); got != c.serving {
+			t.Errorf("%s: Serving() = %v, want %v", c.name, got, c.serving)
+		}
 	}
 }
 

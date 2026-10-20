@@ -425,7 +425,10 @@ explicit tolerance (`minReadyClusters`) folding into the rolled-up `Ready`
 condition. (The KEP additionally specifies that members unreachable beyond a
 grace period surface `Degraded`/`Unknown` rather than blocking the object; the
 PoC currently just marks them not-ready with a reason and retries — one of the
-gaps ledgered in `docs/KEP-GAP.md`.)
+gaps ledgered in `docs/KEP-GAP.md`.) A related call the PoC had to make: while
+a *definition* is being updated across members, `Placed` reports whether each
+member can serve the kind at all, not whether it is on the latest revision —
+see "Placement gate semantics during a definition update" in `docs/KEP-GAP.md`.
 
 Open part: whether tolerance should generalise to a policy enum
 (`All`/`Any`/`Quorum`/percentage), and whether this matches how this group thinks
