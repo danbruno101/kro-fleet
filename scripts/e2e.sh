@@ -645,6 +645,10 @@ new_hash="$(frgd_hash "$ECHO")"
 wait_for 180 "new revision ${new_hash} held and Active on all three members" all_accepted_at "$ECHO" "$new_hash" "$M1" "$M2" "$M3"
 hub delete frgd "$ECHO" --timeout=120s >/dev/null
 for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m on delete (no instances: guard passes)" member "$m" get rgd "$ECHO"; done
+# Stock kro keeps the generated CRD when an RGD is deleted (allowCRDDeletion is off by
+# default). The throwaway kind's CRD still carries the "extra" field added above, and a
+# re-run on the same fleet (E2E_FROM=13) would be refused as a breaking change: drop it.
+for m in "$M1" "$M2" "$M3"; do member "$m" delete crd e2eechoes.kro.run --ignore-not-found --timeout=60s >/dev/null; done
 
 echo "### criterion 17 (gate during the update): with kro paused on member-3, editing the GenAIService definition keeps the placed instance Placed=True there — serving the old revision, the new one pending — and member-3 accepts it once its kro returns"
 ROLL=rollout-llm                      # placed on all three before the edit; reused by criterion 20 as the previously placed copy
