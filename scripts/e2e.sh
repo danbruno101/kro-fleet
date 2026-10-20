@@ -56,6 +56,8 @@
 #                                 asserts, cleans up)
 # Env:   KEEP_FLEET=true         leave clusters up afterwards (default: teardown
 #                                only in CI, keep locally)
+#        E2E_LOADBALANCER=false  skip cloud-provider-kind and criterion 12
+#        E2E_FROM=8|9|13         dev: skip earlier criteria on a fleet that is up
 #        Everything setup-fleet.sh accepts (PREFIX, KIND_NODE_IMAGE, ...).
 # =============================================================================
 set -euo pipefail
@@ -200,8 +202,10 @@ echo "### e2e: setting up the fleet (1 hub + 3 members: gke / aks / eks personas
 
 # cloud-provider-kind hands every kind LoadBalancer Service a real address
 # (so each member exposes its slice through "its own load balancer" exactly
-# as on the clouds). Optional: criterion 12 is skipped when it cannot run.
-if command -v docker >/dev/null 2>&1; then
+# as on the clouds). Optional: criterion 12 is skipped when it cannot run,
+# or when E2E_LOADBALANCER=false (sandboxes whose host cannot resolve the
+# kind node containers by name, which cloud-provider-kind needs).
+if [ "${E2E_LOADBALANCER:-true}" = "true" ] && command -v docker >/dev/null 2>&1; then
   echo "### e2e: starting cloud-provider-kind ${CLOUD_PROVIDER_KIND_VERSION} (LoadBalancer addresses on kind)"
   CPK_BIN="$(mktemp -t cloud-provider-kind-XXXX)"
   if GOBIN="$(dirname "$CPK_BIN")" go install "sigs.k8s.io/cloud-provider-kind@${CLOUD_PROVIDER_KIND_VERSION}" 2>>"$CPK_LOG" && \
