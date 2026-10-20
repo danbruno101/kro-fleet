@@ -12,8 +12,10 @@ thinking the PoC *is* the finished native design.
 > **One-line framing:** the PoC proves the **API, UX, and SIG-Multicluster
 > integration** of fleet-scoped KRO objects — including, since October 2026,
 > consuming a standard `PlacementDecision` to *divide* one object across
-> clouds; it does **not** implement the native, in-kro control loop. That is
-> intentional and is future work.
+> clouds, and authoring the `ResourceGraphDefinition` once on the hub and
+> distributing it to members (the distribution half of upstream kro's
+> KREP-013); it does **not** implement the native, in-kro control loop
+> (KREP-013's expand-on-hub). That is intentional and is future work.
 
 ## The gaps
 
@@ -37,7 +39,12 @@ thinking the PoC *is* the finished native design.
 | **Applied-manifest inventory** | A dedicated per-`(instance, member)` manifest inventory (like OCM `AppliedManifestWork`) | **As proposed** (since the Oct 2026 iteration): one `AppliedManifestRecord` per (instance, member), keyed by GVK/namespace/name — intent written *before* the member is touched, confirmed with UIDs after; unplacement, pruning and finalization delete exactly the recorded objects (label- and UID-guarded). `status.clusters[]` is readiness only | Was: `status.clusters[]` doubling as the inventory, valid only while every member received one identical object. The shared workload namespace is ensured but deliberately not inventoried (the member's `ClusterPlatform` and other instances live there). |
 | **Member readiness** | kro-defined instance readiness contract | **Heuristic**: `status.state == ACTIVE`, else a true `Ready`/`InstanceSynced` condition, combined with `status.readyReplicas` (the fleet RGD surfaces it) against the member's assigned replicas | Matches stock kro's instance status; a contract inside kro would replace the heuristic. |
 | **Serving across clusters** | Cross-cluster networking is a non-goal (MCS-API territory) | Each member exposes its slice through **its own cloud load balancer**, created by the fleet RGD from the platform ConfigMap (per-cloud annotations; the developer names nothing); the hub collects each member's endpoint into `status.clusters[].endpoint`. The **single entry point** is a demo-only gateway on the hub (`fleet-demo gateway`: smooth weighted round-robin by ready replicas, `X-Fleet-Cluster` on every answer) | **MCS-API (`ServiceExport`/`ServiceImport`) is future work**, deliberately not used in this iteration: the model server replicas are stateless and never talk to each other, so per-cloud ingress plus weighted DNS (or this gateway) is enough for the capacity case. |
-| **Workload portability surface** | The developer instance is unchanged across clusters and modes | **As proposed**: the fleet RGDs (`config/rgd/`, derived from the sister project's) resolve storage class, load-balancer flavor, workload identity annotation, accelerator resource and serving image from each member's `ClusterPlatform`; the developer's `GenAIService` is byte-identical on kind, EKS, GKE, AKS and in simulated vs real-GPU mode | The fleet RGD uses a StatefulSet with per-replica volumes instead of the sister's Deployment + shared RWO PVC — the only way N replicas run on a multi-node cluster while keeping the storage-class story. Candidate for upstreaming to the sister repo. |
+| **Definition distribution** | KREP-013 ([kubernetes-sigs/kro#1223](https://github.com/kubernetes-sigs/kro/pull/1223)): RGDs live on the hub only; the hub's kro compiles each revision and distributes the generated CRD to every spoke (opt-out via the `kro.run/distribute` label); spoke instances are reconciled from the hub | **Built — the distribution half only, as a PoC envelope**: a cluster-scoped `FleetResourceGraphDefinition` embeds kro's own `ResourceGraphDefinitionSpec` (imported from kro 0.9.4, never copied) plus `distribution.{enabled, memberSelector}`. The controller server-side-applies a plain `ResourceGraphDefinition` named after the wrapper — spec verbatim, only the placed-by and `fleet.kro.run/spec-hash` labels added — to every registered, healthy member the selector matches, re-applies when the hash changes, and hands every applicable definition to a member on registration. The hub never evaluates a graph: each member's **stock kro** accepts the definition, generates the CRD and expands instances. `distribution.enabled` mirrors KREP-013's label; `memberSelector` is what KREP-013 lists as future work (per-cluster RGD targeting) | The wrapper exists only because the hub runs no kro. If KREP-013 ships hub-side RGDs it collapses into the `kro.run/distribute` label on a plain RGD (and `memberSelector` into whatever per-cluster targeting upstream adopts). What a member receives is byte-for-byte what a platform engineer would have applied by hand. |
+| **Per-member definition status** | One verdict on the hub (`GraphAccepted`): KREP-013 compiles once, on the hub, and lists API-server version skew across spokes as out of scope | `status.members[]` on the wrapper: per member the applied hash, the member kro's `status.state`, its `Ready` condition status, reason and message **verbatim**, and its kro version (read off the kro Deployment's version label, best effort) — fed by a watch on the distributed RGD through multicluster-runtime, never polled. `Distributed` = every targeted healthy member holds the current hash; `Accepted` = every targeted member reports Active, else False naming the first failing member with its own reason. A member that cannot be reached reports `MemberNotEngaged` with state and readiness left empty — unknown, not guessed | Member-side validation gives **per-cluster graph acceptance by construction**: the version-skew criterion (e2e 20) shows one member rejecting a revision the other two accept, with that member's own reason on the hub — something a single hub-side verdict cannot express. |
+| **Placement gate** | n/a — in KREP-013 instances are reconciled from the hub, so an instance never meets a spoke without its CRD | An instance is placed onto a member only once the definition for its kind reports that member accepted. Otherwise the member stays in `status.clusters[]` with reason `RGDNotReady` and the definition's own reason, `Placed` becomes `False/RGDNotReady` and `Ready` counts it as not ready — never silently skipped. A copy placed earlier whose definition stops being Active there is held as is (observed, not converged) | — |
+| **Definition deletion guard** | KREP-013: cross-cluster finalizer GC for composed instances. RGD deletion itself is stock kro's: kro 0.9.4 deletes the generated CRD with the RGD, and with the CRD every instance and its graph | Removing a definition from a member (unplacement or delete) is **refused** while the hub holds `AppliedManifestRecord`s for instances of that kind on that member: `Deleting=False/BlockedByInstances` names the members and instance counts, the `fleet.kro.run/cleanup` finalizer holds the wrapper in Terminating, and removal proceeds on its own once the instances are gone. A member deregistered before removal keeps its copy (logged; there is no orphan ledger for definitions) | The PoC's answer to what deleting a spanning *definition* means: never destroy workloads the hub placed. The inventory for definitions is `status.members[]` itself (hash + UID per member), not a record — the record controller would settle a definition's record as the orphan of an instance that never existed. |
+| **placementDefaults** | KEP v2: placement attached to the RGD (platform-owned) as well as to a platform instance | **Type defined, not wired**: `spec.placementDefaults` (same shape as an instance's `spec.placement.requirements`) is accepted and validated on the wrapper but not yet consumed by the instance controller | Follow-up: an instance without its own requirements inherits the definition's, the instance's own always win, and the resolved source is recorded in `status.placement`. |
+| **Workload portability surface** | The developer instance is unchanged across clusters and modes | **As proposed**: the fleet RGDs (`config/fleet-rgd/`, derived from the sister project's, authored once on the hub) resolve storage class, load-balancer flavor, workload identity annotation, accelerator resource and serving image from each member's `ClusterPlatform`; the developer's `GenAIService` is byte-identical on kind, EKS, GKE, AKS and in simulated vs real-GPU mode | The fleet RGD uses a StatefulSet with per-replica volumes instead of the sister's Deployment + shared RWO PVC — the only way N replicas run on a multi-node cluster while keeping the storage-class story. Candidate for upstreaming to the sister repo. |
 | **Scale** | Fleet-scale (many clusters) | A handful of **kind** clusters on a laptop; three real clusters in the cloud demo | PoC proves correctness, not scale. |
 
 ## What the PoC *does* faithfully prove
@@ -47,6 +54,13 @@ kind, against **stock kro 0.9.4** expanding the placed objects on three
 members with simulated accelerators.
 - One placement-enabled object on a hub, placed onto matching members, with
   aggregated status — the core UX of the KEP (criteria 1–6).
+- The definition authored once on the hub too: distributed to every member,
+  to a late joiner on registration, narrowed by a selector, switched off,
+  updated (every member's copy carries the new hash), gated (no instance
+  lands where the member's kro does not serve the kind), guarded (no
+  definition removed from under hub-placed instances) and version-skewed
+  (one member rejects a revision the others accept, in its own words) —
+  criteria 13–20.
 - Integration with **ClusterProfile** (inventory + `accessProviders`
   credentials + `status.properties`), **About API** properties, a standard
   **PlacementDecision** and **multicluster-runtime** — i.e. the "build on
@@ -85,6 +99,17 @@ accredited environments. Details and measurements: `docs/rebaseline-2026-10.md`.
 
 ## Not attempted (explicitly out of scope for the PoC)
 - Any change to `kubernetes-sigs/kro` itself (the native mode).
+- **Expand-on-hub** (KREP-013's control loop: the hub's kro compiles
+  `GraphRevision`s and reconciles spoke instances from the hub) — the hub
+  runs no kro here; members expand locally, which is what makes per-cluster
+  acceptance possible.
+- **Hub-only composition** (KREP-013's meta-RGD model: child instances
+  created on the hub, leaf resources pushed back to the originating spoke)
+  — needs expand-on-hub plus KREP-012 targets; nothing here composes across
+  clusters.
+- **Phased rollout of a definition across members** (canary one member,
+  then the rest) — out of scope for KREP-013 as well; every targeted member
+  receives the current revision.
 - Cross-cluster networking / service discovery (MCS-API) — future work; see
   "Serving across clusters" above.
 - **Computing** placement inside kro — capacity estimation, policy

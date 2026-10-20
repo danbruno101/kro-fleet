@@ -3,7 +3,8 @@
 # 1 hub + 3 member kind clusters (gke/aks/eks personas, simulated accelerators)
 # and asserts the six success criteria from CLAUDE.md plus the inventory,
 # PlacementDecision, capacity, compliance, drain and gateway scenarios
-# (criteria 7-12) against stock kro on the members.
+# (criteria 7-12) and the definition-distribution scenarios (criteria 13-20)
+# against stock kro on the members.
 name: ci
 
 on:
@@ -53,7 +54,7 @@ jobs:
           curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && sudo chmod +x /usr/local/bin/kubectl
           curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
           kind version && kubectl version --client && helm version --short
-      - name: Run e2e (1 hub + 2 members, all six success criteria)
+      - name: Run e2e (1 hub + 3 members, all twenty criteria)
         run: PRELOAD_IMAGES=true scripts/e2e.sh
       - name: Dump diagnostics on failure
         if: failure()

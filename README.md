@@ -23,8 +23,11 @@ implementation:
 > the same code on EKS + GKE + AKS ([`docs/demo-cloud.md`](docs/demo-cloud.md)).
 > The PoC implements the KEP's **v2.1 scope**: selector or consumed
 > `PlacementDecision`, per-member replicas (division), fail-closed `Placed`,
-> per-member inventory. What still differs from the native design is
-> ledgered in [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
+> per-member inventory — and, adopting the distribution half of upstream
+> kro's [KREP-013](https://github.com/kubernetes-sigs/kro/pull/1223), the
+> `ResourceGraphDefinition` authored once on the hub and distributed to the
+> members. What still differs from the native design is ledgered in
+> [`docs/KEP-GAP.md`](docs/KEP-GAP.md).
 
 ## The idea
 
@@ -52,7 +55,14 @@ decision; it never computes one.
 
 - **This PoC does NOT fork or modify kro.** It runs **stock kro on each member
   cluster** (which does the local graph expansion, exactly as in the demo) and adds
-  **only a hub-side fleet placement controller**.
+  **only a hub-side fleet placement controller**. No kro runs on the hub.
+- **Both the definition and the instance are authored once, on the hub.** A
+  `FleetResourceGraphDefinition` wraps kro's own `ResourceGraphDefinitionSpec`
+  verbatim; the controller hands each member a plain `ResourceGraphDefinition`
+  (KREP-013's `kro.run/distribute`, plus a member selector) and reads each
+  member's **own** kro verdict back — per-cluster graph acceptance by
+  construction. An instance is placed only where its definition is Active, and
+  a definition is never removed from under instances the hub placed.
 - It is built **on existing SIG-Multicluster standards** — not a new propagation
   engine:
   - **[ClusterProfile / Cluster Inventory API](https://github.com/kubernetes-sigs/cluster-inventory-api)**
@@ -78,10 +88,14 @@ decision; it never computes one.
                          HUB CLUSTER
    ┌───────────────────────────────────────────────────────────┐
    │  fleet placement controller (multicluster-runtime)         │
+   │   • distributes a FleetResourceGraphDefinition as a plain  │
+   │     RGD to selected members; per-member Active/reason back │
+   │     (Distributed / Accepted); deletion guarded by instances │
    │   • watches a FleetGenAIService: placement = clusterSelector│
    │     or a consumed PlacementDecision (+ per-member replicas) │
    │   • reads the ClusterProfile inventory + status.properties │
-   │   • places each member's copy; AppliedManifestRecord per   │
+   │   • places each member's copy where its definition is      │
+   │     Active (else RGDNotReady); AppliedManifestRecord per   │
    │     (instance, member); GC on unplace/delete, orphan ledger │
    │   • Placed (fail-closed) + Ready (by replicas) on the hub   │
    │  demo-only: inventory agent, scheduler, gateway (fleet-demo)│
@@ -90,17 +104,21 @@ decision; it never computes one.
                    │               │               │
              ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
              │ member gke│   │ member aks│   │ member eks│
-             │ stock kro │   │ stock kro │   │ stock kro │  ← expands the graph
-             │ + RGDs    │   │ + RGDs    │   │ + RGDs    │    locally, per cloud
+             │ stock kro │   │ stock kro │   │ stock kro │  ← accepts the RGD,
+             │ + RGD from│   │ + RGD from│   │ + RGD from│    expands the graph
+             │   the hub │   │   the hub │   │   the hub │    locally, per cloud
              └───────────┘   └───────────┘   └───────────┘
 ```
 
 ## Try it
 
 ```bash
-scripts/setup-fleet.sh 3                          # 1 hub + 3 member kind clusters (gke/aks/eks personas, 4 fake GPUs each)
+scripts/setup-fleet.sh 3                          # 1 hub + 3 member kind clusters (gke/aks/eks personas, 4 fake GPUs each);
+                                                  # the two definitions (config/fleet-rgd/) are authored on the hub and
+                                                  # distributed to the members by a bootstrap controller during setup
 go run ./cmd/fleet-controller --hub-context kind-kro-fleet-hub \
   --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin &   # built by setup-fleet.sh
+kubectl --context kind-kro-fleet-hub get frgd    # KIND / DISTRIBUTED / ACCEPTED / MEMBERS (accepted/targeted) per definition
 go run ./cmd/fleet-demo all --hub-context kind-kro-fleet-hub \
   --kubeconfig-secretreader-plugin bin/kubeconfig-secretreader-plugin &   # demo-only: inventory agent + scheduler
 
@@ -109,7 +127,8 @@ kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-sample.
 # division: 8 replicas no member can hold alone, split by a PlacementDecision
 kubectl --context kind-kro-fleet-hub apply -f examples/fleetgenaiservice-divided.yaml
 kubectl --context kind-kro-fleet-hub get fgs,placementdecisions,appliedmanifestrecords -n fleet-demo
-scripts/e2e.sh                                    # assert all twelve criteria (CI runs this)
+kubectl --context kind-kro-fleet-hub get frgd genaiservice.kro.run -o jsonpath='{range .status.members[*]}{.name}: {.state} ({.reason}) kro {.kroVersion}{"\n"}{end}'
+scripts/e2e.sh                                    # assert all twenty criteria (CI runs this)
 scripts/teardown-fleet.sh
 ```
 
