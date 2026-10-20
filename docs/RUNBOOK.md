@@ -155,6 +155,7 @@ version of the same demo is `scripts/demo.sh` (`docs/demo-cloud.md`).
 scripts/e2e.sh    # runs all twenty criteria; same script CI runs (~45 min)
 E2E_FROM=8 scripts/e2e.sh   # dev: only the decision/demo scenarios, on a fleet that is already up
 E2E_FROM=13 scripts/e2e.sh  # dev: only the definition-distribution scenarios (14, 15, 17-20)
+E2E_LOADBALANCER=false scripts/e2e.sh   # skip cloud-provider-kind + criterion 12 (hosts that cannot resolve kind node names)
 ```
 
 ## 6. Teardown
