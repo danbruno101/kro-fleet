@@ -54,7 +54,7 @@ jobs:
           curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && sudo chmod +x /usr/local/bin/kubectl
           curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
           kind version && kubectl version --client && helm version --short
-      - name: Run e2e (1 hub + 3 members, all twenty criteria)
+      - name: Run e2e (1 hub + 3 members, all twenty-one criteria)
         run: PRELOAD_IMAGES=true scripts/e2e.sh
       - name: Dump diagnostics on failure
         if: failure()
