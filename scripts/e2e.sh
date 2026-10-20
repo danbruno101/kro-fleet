@@ -671,6 +671,9 @@ wait_for 60 "${ROLL} stays Placed=True on all three; member-3's entry says the n
 [ "$(hub get fgs "$ROLL" -n "$WORKLOAD_NS" -o jsonpath='{.status.conditions[?(@.type=="Placed")].lastTransitionTime}')" = "$placed_lt_before" ] || fail "Placed must not flap during a definition update (lastTransitionTime changed)"
 [ -z "$(cluster_field "$ROLL" "$M3" reason)" ] || fail "a member serving an older revision is placed, not RGDNotReady: got '$(cluster_field "$ROLL" "$M3" reason)'"
 echo "    member-3 entry: $(cluster_field "$ROLL" "$M3" message)"
+# The apply succeeded; only kro's evaluation is pending, so the note carries no reason.
+echo "$(cluster_field "$ROLL" "$M3" message)" | grep -q "revision $roll_hash pending" || fail "member-3's entry must say the new revision is pending"
+echo "$(cluster_field "$ROLL" "$M3" message)" | grep -q "ApplyFailed" && fail "the pending note must not carry ApplyFailed when the apply succeeded: $(cluster_field "$ROLL" "$M3" message)"
 member "$M3" scale deployment -n kro -l app.kubernetes.io/name=kro --replicas=1 >/dev/null
 wait_for 180 "member-3 accepts the new revision once its kro returns" all_accepted_at "$GEN" "$roll_hash" "$M1" "$M2" "$M3"
 wait_for 60 "${ROLL}'s member-3 entry no longer pending" bash -c "! cluster_field $ROLL $M3 message | grep -q 'revision $roll_hash pending'"
