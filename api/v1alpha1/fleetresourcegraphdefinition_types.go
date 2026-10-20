@@ -73,8 +73,9 @@ const (
 	ReasonBlockedByInstances  = "BlockedByInstances"
 	ReasonNoRemovalPending    = "NoRemovalPending"
 
-	// Reasons on status.members[] that are NOT the member's own: set only
-	// when the member could not be observed at all.
+	// Reasons on status.members[] that are NOT the member's own: set when
+	// the member could not be observed at all, or when what it reports is
+	// not yet about the current revision.
 
 	// ReasonMemberNotEngaged: the member is registered but not reachable
 	// (unhealthy per its cluster manager, or no credentials). State and
@@ -86,6 +87,11 @@ const (
 	// ReasonNotDistributed: the member is targeted but the controller has
 	// not written to it yet, or it is pending removal.
 	ReasonNotDistributed = "NotDistributed"
+	// ReasonReconciling: the member holds the current revision but its kro
+	// has not evaluated that generation yet — its Ready condition is about
+	// an older revision. Ready is reported Unknown rather than letting a
+	// stale True count as acceptance of the new revision.
+	ReasonReconciling = "Reconciling"
 
 	// ReasonRGDNotReady on a FleetGenAIService's Placed condition and on a
 	// status.clusters[] entry: the member is decided but the definition for

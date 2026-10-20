@@ -382,7 +382,7 @@ func (r *DefinitionReconciler) distributeToMember(ctx context.Context, frgd *fle
 		// kro has not evaluated this generation yet: its Ready is about an
 		// older revision. Say so rather than letting a stale True count.
 		st.Ready = string(metav1.ConditionUnknown)
-		st.Reason = "Reconciling"
+		st.Reason = fleetv1alpha1.ReasonReconciling
 		st.Message = fmt.Sprintf("member kro has evaluated generation %d, copy is at generation %d", o.ReadyObservedGeneration, o.Generation)
 	}
 	st.KroVersion = r.kroVersion(ctx, cl, member)
