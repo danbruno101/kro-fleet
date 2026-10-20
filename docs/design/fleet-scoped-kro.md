@@ -548,7 +548,10 @@ clusters differ, so `GraphAccepted` may need to become per-target-cluster rather
 than a single condition. The PoC sidesteps rather than solves this: because
 each member's own kro validates the distributed definition, per-cluster graph
 acceptance falls out by construction — the hub only reads each member's verdict
-back (`status.members[]`, e2e criterion 20) and gates placement on it.
+back (`status.members[]`, e2e criterion 20) and gates placement on it. Note
+this is detection *after* distribution, not validation *before* it: the target
+cluster is known at distribution time, not at authoring time, so a bad revision
+reaches every member before any member reports rejecting it.
 
 ### Scale
 
