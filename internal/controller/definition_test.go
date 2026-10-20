@@ -297,7 +297,9 @@ func TestDefinitionGate(t *testing.T) {
 	pending.AppliedHash, pending.AcceptedHash = "h2", "h1"
 	// Serving h1 but on its way out (deselected): not a placement target.
 	removing := fleetv1alpha1.MemberDefinitionStatus{Name: "m7", Applied: false, AppliedHash: "h1", AcceptedHash: "h1", State: "Active", Ready: "True", Reason: fleetv1alpha1.ReasonNotDistributed, Message: "pending removal: the copy is still terminating on the member"}
-	d.Status.Members = []fleetv1alpha1.MemberDefinitionStatus{accepted, staleActive, rejected, neverActive, pending, removing}
+	// Serving h1; the hub could not write h2 to it: pending for a reason.
+	applyFailed := fleetv1alpha1.MemberDefinitionStatus{Name: "m8", Applied: false, AppliedHash: "h1", AcceptedHash: "h1", State: "Active", Ready: "True", Reason: fleetv1alpha1.ReasonApplyFailed, Message: "admission webhook denied the request"}
+	d.Status.Members = []fleetv1alpha1.MemberDefinitionStatus{accepted, staleActive, rejected, neverActive, pending, removing, applyFailed}
 
 	t.Run("accepted member passes without a note", func(t *testing.T) {
 		if ok, note := DefinitionGate(d, gvk, "m1"); !ok || note != "" {
@@ -323,8 +325,21 @@ func TestDefinitionGate(t *testing.T) {
 	})
 	t.Run("Unknown after an update passes with the pending message", func(t *testing.T) {
 		ok, note := DefinitionGate(d, gvk, "m6")
-		if !ok || !strings.Contains(note, "serving revision h1") || !strings.Contains(note, "revision h2 pending") {
-			t.Fatalf("an unevaluated new revision must not close the gate: %v %q", ok, note)
+		// Reconciling is the expected reason for a pending revision: the
+		// note stays in its short form.
+		if !ok || note != "serving revision h1 of definition genaiservice.kro.run; revision h2 pending" {
+			t.Fatalf("an unevaluated new revision must not close the gate, and Reconciling adds nothing to the note: %v %q", ok, note)
+		}
+	})
+	t.Run("pending for another reason carries the member's reason and message", func(t *testing.T) {
+		ok, note := DefinitionGate(d, gvk, "m8")
+		if !ok || note != "serving revision h1 of definition genaiservice.kro.run; revision h2 pending: ApplyFailed: admission webhook denied the request" {
+			t.Fatalf("a serving member whose new revision failed to apply must pass, with why: %v %q", ok, note)
+		}
+	})
+	t.Run("serving member with an empty reason keeps the short note", func(t *testing.T) {
+		if ok, note := DefinitionGate(d, gvk, "m2"); !ok || note != "serving revision h1 of definition genaiservice.kro.run; revision h2 pending" {
+			t.Fatalf("no reason means nothing to append: %v %q", ok, note)
 		}
 	})
 	t.Run("pending removal blocks even while serving", func(t *testing.T) {

@@ -361,13 +361,19 @@ func RollupDefinition(in DefinitionRollup) (distributed, accepted, deleting meta
 // member on the latest revision": a member passes when the definition for
 // the kind exists on the hub, targets the member, and the member's copy is
 // Serving (reported Active at SOME revision and has not rejected the
-// current one). A member serving an older revision while its kro evaluates
-// the new one passes with a note — "serving revision <old>; revision
-// <new> pending" — for the instance's status.clusters[] entry, so the
-// rollout is visible without flapping Placed on every definition edit. A
-// member that holds no copy, has never reported Active, explicitly
-// rejected the current revision, or is pending removal is blocked, with
-// why in the definition's (i.e. the member kro's) own words.
+// current one). A member serving an older revision while the new one is
+// not yet in force there passes with a note for the instance's
+// status.clusters[] entry, so the rollout is visible without flapping
+// Placed on every definition edit. The note has two forms: "serving
+// revision <old> of definition <name>; revision <new> pending" when the
+// member's reason is empty or Reconciling (its kro has not evaluated the
+// new generation yet); otherwise the member's reason and message are
+// appended verbatim — "…; revision <new> pending: ApplyFailed: <message>"
+// — because the revision is pending for a reason worth seeing (the hub
+// could not write it, or the member is unreachable right now). A member
+// that holds no copy, has never reported Active, explicitly rejected the
+// current revision, or is pending removal is blocked, with why in the
+// definition's (i.e. the member kro's) own words.
 func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.GroupVersionKind, member string) (ok bool, note string) {
 	if def == nil {
 		return false, fmt.Sprintf("no FleetResourceGraphDefinition for kind %s on the hub", gvk.Kind)
@@ -384,7 +390,16 @@ func DefinitionGate(def *fleetv1alpha1.FleetResourceGraphDefinition, gvk schema.
 			return true, ""
 		}
 		if m.Serving() {
-			return true, fmt.Sprintf("serving revision %s of definition %s; revision %s pending", m.AcceptedHash, def.Name, def.Status.SpecHash)
+			note := fmt.Sprintf("serving revision %s of definition %s; revision %s pending", m.AcceptedHash, def.Name, def.Status.SpecHash)
+			if m.Reason != "" && m.Reason != fleetv1alpha1.ReasonReconciling {
+				// Pending for a reason other than "not evaluated yet":
+				// say it, in the member entry's own words.
+				note += ": " + m.Reason
+				if m.Message != "" {
+					note += ": " + m.Message
+				}
+			}
+			return true, note
 		}
 		why := fmt.Sprintf("definition %s is not Active on this member", def.Name)
 		switch {
