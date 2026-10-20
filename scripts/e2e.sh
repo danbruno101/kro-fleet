@@ -29,6 +29,27 @@
 #      inventory record is gone
 #  12. one URL: the demo gateway spreads requests across the members' own
 #      load balancers (needs cloud-provider-kind; skipped when unavailable)
+#  13. definition distribution: a FleetResourceGraphDefinition authored once
+#      on the hub lands as a plain ResourceGraphDefinition on every registered
+#      member, each member's own kro reports it Active, and the hub shows it
+#      (Distributed / Accepted / MEMBERS, per-member hash, state, kro version)
+#  14. distribution.enabled=false removes the definition from every member
+#  15. memberSelector narrows distribution to matching members (and removes
+#      it elsewhere)
+#  16. a late-joining member receives every applicable definition on
+#      registration — before any instance is placed on it
+#  17. a spec update propagates: the hash changes on the hub and on every
+#      member's copy, and every member accepts the new revision
+#  18. placement gate: an instance is not placed on a member until the
+#      definition for its kind reports that member Active; the member is
+#      reported with reason RGDNotReady, never silently dropped
+#  19. deletion guard: removing a definition (unplacement or delete) from a
+#      member that still hosts hub-placed instances of its kind is refused
+#      with Deleting=False naming the member and count, and proceeds on its
+#      own once the instances are gone
+#  20. version skew: a definition one member cannot accept is reported with
+#      that member's own reason, the others Active, Accepted=False on the hub,
+#      and an instance of that kind lands only on the accepting members
 #
 # Usage: scripts/e2e.sh          (creates the fleet via setup-fleet.sh, runs the
 #                                 controller + demo processes as host processes,
@@ -117,6 +138,52 @@ register_member2() {
   fleet::register_member "$M2" aks "$kc" prod
   rm -f "$kc"
 }
+# --- definition helpers (FleetResourceGraphDefinition = frgd) -------------------
+GEN=genaiservice.kro.run            # the two fleet definitions setup-fleet.sh authored on the hub
+PLAT=clusterplatform.kro.run
+ECHO=e2e-echo.kro.run               # a throwaway definition used by criteria 13-17
+frgd_cond()         { hub get frgd "$1" -o jsonpath="{.status.conditions[?(@.type=='$2')].$3}" 2>/dev/null; }   # frgd_cond <name> <type> <status|reason|message>
+frgd_is()           { [ "$(frgd_cond "$1" "$2" status)" = "$3" ]; }
+frgd_reason_is()    { [ "$(frgd_cond "$1" "$2" reason)" = "$3" ]; }
+frgd_members()      { hub get frgd "$1" -o jsonpath='{.status.summary.members}' 2>/dev/null; }
+frgd_members_is()   { [ "$(frgd_members "$1")" = "$2" ]; }
+frgd_hash()         { hub get frgd "$1" -o jsonpath='{.status.specHash}' 2>/dev/null; }
+frgd_member()       { hub get frgd "$1" -o jsonpath="{.status.members[?(@.name=='$2')].$3}" 2>/dev/null; }     # frgd_member <name> <member> <field>
+member_rgd_hash()   { member "$1" get rgd "$2" -o jsonpath='{.metadata.labels.fleet\.kro\.run/spec-hash}' 2>/dev/null; }
+member_rgd_state()  { member "$1" get rgd "$2" -o jsonpath='{.status.state}' 2>/dev/null; }
+# accepted_at <definition> <member> <hash>: the hub says the member holds <hash> and its kro reports Active, and the member's copy agrees
+accepted_at() {
+  [ "$(frgd_member "$1" "$2" appliedHash)" = "$3" ] && [ "$(frgd_member "$1" "$2" state)" = "Active" ] && [ "$(frgd_member "$1" "$2" ready)" = "True" ] &&
+  [ "$(member_rgd_hash "$2" "$1")" = "$3" ] && [ "$(member_rgd_state "$2" "$1")" = "Active" ]
+}
+all_accepted_at() { local d=$1 h=$2; shift 2; local m; for m in "$@"; do accepted_at "$d" "$m" "$h" || return 1; done; frgd_is "$d" Accepted True && frgd_is "$d" Distributed True; }
+# Compound checks run as `bash -c "..."` under wait_for; the helpers (and what they read) travel with them.
+export HUB_CTX WORKLOAD_NS FLEET_NS M1 M2 M3 GEN PLAT ECHO
+export -f hub member frgd_cond frgd_is frgd_reason_is frgd_members frgd_members_is frgd_hash frgd_member member_rgd_hash member_rgd_state accepted_at all_accepted_at
+apply_echo_definition() {
+  cat <<EOF | hub apply -f - >/dev/null
+apiVersion: fleet.kro.run/v1alpha1
+kind: FleetResourceGraphDefinition
+metadata:
+  name: ${ECHO}
+spec:
+  resourceGraphDefinition:
+    schema:
+      apiVersion: v1alpha1
+      kind: E2EEcho
+      spec:
+        message: string | default="hi"
+    resources:
+      - id: echo
+        template:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: \${schema.metadata.name}
+          data:
+            message: \${schema.spec.message}
+EOF
+}
 
 cleanup() {
   [ -n "$CTRL_PID" ] && kill "$CTRL_PID" 2>/dev/null || true
@@ -167,6 +234,18 @@ if [ "${E2E_FROM:-1}" -le 7 ]; then
 echo "### criterion 3 (part 1): member-2 is NOT registered when the workload is placed"
 hub delete clusterprofile "$M2" -n "$FLEET_NS" --ignore-not-found >/dev/null
 
+echo "### criterion 13: the two definitions authored once on the hub are on every registered member (member-1, member-3), each member's kro reports them Active"
+for d in "$GEN" "$PLAT"; do
+  wait_for 120 "$d: MEMBERS 2/2 (accepted/targeted) now that member-2 is deregistered" frgd_members_is "$d" 2/2
+  wait_for 60 "$d: hub hash held and Active on member-1 and member-3, Distributed=True, Accepted=True" all_accepted_at "$d" "$(frgd_hash "$d")" "$M1" "$M3"
+done
+[ "$(hub get rgd 2>&1 | grep -c 'the server doesn')" = "1" ] || fail "the hub must not know the ResourceGraphDefinition kind: no kro on the hub"
+v="$(frgd_member "$GEN" "$M1" kroVersion)"; [ -n "$v" ] || fail "kroVersion not read off member-1's kro Deployment"
+echo "    ok: member-1 runs kro ${v}; $(hub get frgd --no-headers | tr -s ' ' | tr '\n' ';')"
+apply_echo_definition
+wait_for 120 "throwaway definition ${ECHO} distributed + Accepted on the 2 registered members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M3"
+hub get rgd "$ECHO" >/dev/null 2>&1 && fail "no copy of a definition may exist on the hub"
+
 echo "### criterion 1: place -> Ready on every matching member"
 hub apply -f "$REPO_ROOT/examples/fleetgenaiservice-sample.yaml"
 wait_for 420 "workload Ready on member-1 and member-3 (real kro expansion)" is_ready 2
@@ -182,6 +261,10 @@ echo "### criterion 6: status.clusters[] + rollup are correct (2 members)"
 
 echo "### criterion 3 (part 2): registering member-2's ClusterProfile lands the workload automatically"
 register_member2
+echo "### criterion 16: the late-joining member-2 receives every applicable definition on registration, before the workload"
+for d in "$GEN" "$PLAT" "$ECHO"; do
+  wait_for 180 "$d: distributed + Accepted on member-2 (3/3)" all_accepted_at "$d" "$(frgd_hash "$d")" "$M1" "$M2" "$M3"
+done
 wait_for 300 "workload landed + Ready on freshly added member-2" is_ready 3
 wait_for 60 "AppliedManifestRecord demo-llm-${M2} confirms the GenAIService" record_applied "$M2"
 
@@ -217,7 +300,7 @@ member "$M2" label configmap stray -n "$WORKLOAD_NS" "fleet.kro.run/placed-by=de
 hub patch amr "demo-llm-${M2}" -n "$WORKLOAD_NS" --subresource=status --type=json \
   -p '[{"op":"add","path":"/status/applied/-","value":{"version":"v1","kind":"ConfigMap","namespace":"'"$WORKLOAD_NS"'","name":"stray"}}]' >/dev/null
 wait_gone 120 "stale ConfigMap pruned from member-2 by the inventory" member "$M2" get configmap stray -n "$WORKLOAD_NS"
-wait_for 60 "record no longer lists the pruned object" sh -c "! hub get amr demo-llm-${M2} -n $WORKLOAD_NS -o jsonpath='{.status.applied[*].name}' | grep -q stray"
+wait_for 60 "record no longer lists the pruned object" bash -c "! hub get amr demo-llm-${M2} -n $WORKLOAD_NS -o jsonpath='{.status.applied[*].name}' | grep -q stray"
 member "$M2" get genaiservice demo-llm -n "$WORKLOAD_NS" >/dev/null || fail "pruning must not touch the intended object"
 
 echo "### criterion 5 + 7 (part 3): delete the hub object -> fleet-wide GC; an unreachable member blocks, a deregistered one is surfaced as an orphan and settled when it returns"
@@ -396,6 +479,7 @@ spec:
 EOF
 }
 
+if [ "${E2E_FROM:-1}" -le 9 ]; then
 echo "### criterion 9: capacity across clouds — free accelerators advertised per member; 8 replicas no member can hold alone are divided"
 for m in "$M1" "$M2" "$M3"; do
   wait_for 180 "$m advertises gpus-free.example.com=4 on the hub (inventory agent)" has_property "$m" gpus-free.example.com 4
@@ -486,6 +570,138 @@ for m in "$M1" "$M2" "$M3"; do
   wait_gone 120 "record ${CAP}-${m} gone" hub get amr "${CAP}-${m}" -n "$WORKLOAD_NS"
 done
 wait_gone 60 "PlacementDecision ${CAP} garbage-collected with its instance" hub get placementdecision "$CAP" -n "$WORKLOAD_NS"
+fi  # E2E_FROM
+
+# --- definition distribution scenarios (criteria 14, 15, 17-20); 13 and 16 ran with the replicated flow
+if [ "${E2E_FROM:-1}" -le 13 ]; then
+hub get frgd "$ECHO" >/dev/null 2>&1 || apply_echo_definition   # E2E_FROM >= 13: criterion 13 did not run
+wait_for 180 "${ECHO} Accepted on all three members" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+
+echo "### criterion 14: distribution.enabled=false removes the definition from every member"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":false}}}' >/dev/null
+for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m" member "$m" get rgd "$ECHO"; done
+wait_for 60 "Distributed=False/DistributionDisabled, MEMBERS 0/0" bash -c "frgd_reason_is $ECHO Distributed DistributionDisabled && frgd_members_is $ECHO 0/0"
+[ -z "$(hub get frgd "$ECHO" -o jsonpath='{.status.members[*].name}')" ] || fail "status.members[] must be empty once removed everywhere"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"enabled":true}}}' >/dev/null
+wait_for 180 "enabled again: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+
+echo "### criterion 15: memberSelector narrows distribution to the matching member (aks persona) and removes it elsewhere"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":{"matchProperties":{"cloud.example.com":"aks"}}}}}' >/dev/null
+wait_gone 120 "${ECHO} removed from member-1 (gke)" member "$M1" get rgd "$ECHO"
+wait_gone 120 "${ECHO} removed from member-3 (eks)" member "$M3" get rgd "$ECHO"
+member "$M2" get rgd "$ECHO" >/dev/null || fail "the selected member must keep the definition"
+wait_for 60 "MEMBERS 1/1, only member-2 listed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.summary.members}/{.status.members[*].name}')\" = '1/1/$M2' ]"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"distribution":{"memberSelector":null}}}' >/dev/null
+wait_for 180 "selector removed: back on all three members, Accepted" all_accepted_at "$ECHO" "$(frgd_hash "$ECHO")" "$M1" "$M2" "$M3"
+
+echo "### criterion 17: a spec update propagates — the hash changes on the hub and on every member's copy, every member accepts the new revision"
+old_hash="$(frgd_hash "$ECHO")"
+hub patch frgd "$ECHO" --type=merge -p '{"spec":{"resourceGraphDefinition":{"schema":{"spec":{"message":"string | default=\"hello\"","extra":"string | default=\"\""}}}}}' >/dev/null
+wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $ECHO -o jsonpath='{.status.specHash}')\" != '$old_hash' ]"
+new_hash="$(frgd_hash "$ECHO")"
+wait_for 180 "new revision ${new_hash} held and Active on all three members" all_accepted_at "$ECHO" "$new_hash" "$M1" "$M2" "$M3"
+hub delete frgd "$ECHO" --timeout=120s >/dev/null
+for m in "$M1" "$M2" "$M3"; do wait_gone 120 "${ECHO} removed from $m on delete (no instances: guard passes)" member "$m" get rgd "$ECHO"; done
+
+echo "### criterion 20: version skew — the GenAIService definition gains a resource whose CRD only member-1 and member-2 have; member-3 rejects it with its own reason"
+member "$M1" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
+member "$M2" apply -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" >/dev/null
+gen_hash_before="$(frgd_hash "$GEN")"
+hub patch frgd "$GEN" --type=json -p '[{"op":"add","path":"/spec/resourceGraphDefinition/resources/-","value":{"id":"skewMarker","template":{"apiVersion":"skew.e2e.example.com/v1","kind":"SkewMarker","metadata":{"name":"${schema.spec.name}-skew"},"spec":{"note":"version skew probe"}}}}]' >/dev/null
+wait_for 60 "hub specHash changed" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" != '$gen_hash_before' ]"
+skew_hash="$(frgd_hash "$GEN")"
+m3_rejects() { [ "$(frgd_member "$GEN" "$M3" appliedHash)" = "$skew_hash" ] && [ "$(frgd_member "$GEN" "$M3" state)" = "Inactive" ] && [ -n "$(frgd_member "$GEN" "$M3" reason)" ]; }
+wait_for 180 "member-3 holds the new revision and its kro reports it Inactive with a reason" m3_rejects
+echo "    member-3 says: $(frgd_member "$GEN" "$M3" reason): $(frgd_member "$GEN" "$M3" message)"
+echo "$(frgd_member "$GEN" "$M3" reason) $(frgd_member "$GEN" "$M3" message)" | grep -qi "skewmarker\|skew.e2e.example.com" || fail "member-3's reason/message must be its kro's own words about the unknown kind"
+[ "$(member_rgd_state "$M3" "$GEN")" = "Inactive" ] || fail "the hub must report exactly what member-3's kro reports"
+wait_for 180 "member-1 and member-2 accept the new revision" bash -c "accepted_at $GEN $M1 $skew_hash && accepted_at $GEN $M2 $skew_hash"
+wait_for 60 "Accepted=False naming member-3; Distributed=True (every member holds the hash); MEMBERS 2/3" bash -c "frgd_is $GEN Accepted False && frgd_is $GEN Distributed True && frgd_members_is $GEN 2/3"
+echo "$(frgd_cond "$GEN" Accepted message)" | grep -q "$M3" || fail "Accepted=False must name the rejecting member: $(frgd_cond "$GEN" Accepted message)"
+SKEW=skew-llm
+apply_mock_instance() {  # apply_mock_instance <name>: replicated to every tier=prod member, Ready with one cluster
+  cat <<EOF | hub apply -f - >/dev/null
+apiVersion: fleet.kro.run/v1alpha1
+kind: FleetGenAIService
+metadata:
+  name: $1
+  namespace: ${WORKLOAD_NS}
+spec:
+  placement:
+    clusterSelector:
+      matchLabels:
+        tier: prod
+    tolerance:
+      minReadyClusters: 1
+  template:
+    spec:
+      name: $1
+      model: "Qwen/Qwen2.5-0.5B-Instruct"
+      mode: mock
+      replicas: 1
+      cacheSize: 1Gi
+      monitoring: false
+EOF
+}
+summary_of()   { hub get fgs "$1" -n "$WORKLOAD_NS" -o jsonpath="{.status.summary.$2}" 2>/dev/null; }
+cluster_field(){ hub get fgs "$1" -n "$WORKLOAD_NS" -o jsonpath="{.status.clusters[?(@.name=='$2')].$3}" 2>/dev/null; }
+placed_ready_is() { [ "$(summary_of "$1" placed)" = "$2" ] && [ "$(summary_of "$1" ready)" = "$3" ]; }
+export -f summary_of cluster_field placed_ready_is placed_reason_of ready_status_of
+apply_mock_instance "$SKEW"
+wait_for 300 "${SKEW} placed on the two accepting members only, both Ready (summary placed=2 ready=2)" placed_ready_is "$SKEW" 2 2
+[ "$(cluster_field "$SKEW" "$M3" reason)" = "RGDNotReady" ] || fail "member-3 must be reported in status.clusters[] with reason RGDNotReady, got '$(cluster_field "$SKEW" "$M3" reason)'"
+echo "$(cluster_field "$SKEW" "$M3" message)" | grep -q "not Active" || fail "member-3's entry must carry the definition's reason: $(cluster_field "$SKEW" "$M3" message)"
+[ "$(placed_reason_of "$SKEW")" = "RGDNotReady" ] || fail "Placed must be False/RGDNotReady while a decided member is gated, got $(placed_reason_of "$SKEW")"
+[ "$(ready_status_of "$SKEW")" = "True" ] || fail "Ready should be True with tolerance minReadyClusters=1 and two ready members"
+member "$M3" get genaiservice "$SKEW" -n "$WORKLOAD_NS" >/dev/null 2>&1 && fail "nothing may be placed on the rejecting member"
+hub get amr "${SKEW}-${M3}" -n "$WORKLOAD_NS" >/dev/null 2>&1 && fail "no intent record may exist for a gated member"
+echo "    ok: placed on 2, member-3 reported RGDNotReady, never dropped"
+echo "### criterion 20 (recovery): reverting the definition makes member-3 Active again and the instance lands there"
+hub patch frgd "$GEN" --type=json -p '[{"op":"remove","path":"/spec/resourceGraphDefinition/resources/6"}]' >/dev/null
+wait_for 60 "hub specHash back to ${gen_hash_before}" sh -c "[ \"\$(kubectl --context $HUB_CTX get frgd $GEN -o jsonpath='{.status.specHash}')\" = '$gen_hash_before' ]"
+wait_for 180 "all three members Active on the reverted revision" all_accepted_at "$GEN" "$gen_hash_before" "$M1" "$M2" "$M3"
+wait_for 300 "${SKEW} now placed + Ready on all three (3/3), Placed=True" bash -c "placed_ready_is $SKEW 3 3 && [ \"\$(placed_reason_of $SKEW)\" = Placed ]"
+member "$M1" delete -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" --ignore-not-found >/dev/null
+member "$M2" delete -f "$REPO_ROOT/hack/testdata/e2e-skew-crd.yaml" --ignore-not-found >/dev/null
+
+echo "### criterion 19 (unplacement): deselecting member-2 while it hosts ${SKEW} is refused — Deleting=False/BlockedByInstances naming it — and proceeds once the instance is gone"
+hub patch frgd "$GEN" --type=merge -p '{"spec":{"distribution":{"memberSelector":{"matchProperties":{"capacity-type.example.com":"on-demand"}}}}}' >/dev/null   # member-2 (aks) is spot
+wait_for 60 "Deleting=False/BlockedByInstances" frgd_reason_is "$GEN" Deleting BlockedByInstances
+echo "$(frgd_cond "$GEN" Deleting message)" | grep -q "${M2} (1 instance(s))" || fail "the guard must name the blocking member and its instance count: $(frgd_cond "$GEN" Deleting message)"
+member "$M2" get rgd "$GEN" >/dev/null || fail "the definition must stay on member-2 while its instance exists"
+member "$M2" get genaiservice "$SKEW" -n "$WORKLOAD_NS" >/dev/null || fail "the instance on member-2 must be untouched"
+hub delete fgs "$SKEW" -n "$WORKLOAD_NS" --timeout=180s >/dev/null
+wait_gone 180 "definition removed from member-2 once its last instance is gone" member "$M2" get rgd "$GEN"
+wait_for 60 "Deleting=False/NoRemovalPending, MEMBERS 2/2" bash -c "frgd_reason_is $GEN Deleting NoRemovalPending && frgd_members_is $GEN 2/2"
+
+echo "### criterion 18: placement gate — with no GenAIService definition on member-2, an instance is placed on member-1 and member-3 only; member-2 is reported RGDNotReady"
+GATED=gated-llm
+apply_mock_instance "$GATED"
+wait_for 300 "${GATED} placed + Ready on member-1 and member-3 (2/2)" placed_ready_is "$GATED" 2 2
+[ "$(cluster_field "$GATED" "$M2" reason)" = "RGDNotReady" ] || fail "member-2 must be reported with reason RGDNotReady, got '$(cluster_field "$GATED" "$M2" reason)'"
+echo "$(cluster_field "$GATED" "$M2" message)" | grep -q "not distributed to this member" || fail "member-2's message must say why: $(cluster_field "$GATED" "$M2" message)"
+[ "$(placed_reason_of "$GATED")" = "RGDNotReady" ] || fail "Placed must be False/RGDNotReady, got $(placed_reason_of "$GATED")"
+member "$M2" get genaiservice "$GATED" -n "$WORKLOAD_NS" >/dev/null 2>&1 && fail "nothing may be placed on a member whose kro does not serve the kind"
+hub patch frgd "$GEN" --type=merge -p '{"spec":{"distribution":{"memberSelector":null}}}' >/dev/null
+wait_for 180 "definition back on member-2, Active" accepted_at "$GEN" "$M2" "$(frgd_hash "$GEN")"
+wait_for 300 "${GATED} lands on member-2 as soon as the gate opens: 3/3, Placed=True" bash -c "placed_ready_is $GATED 3 3 && [ \"\$(placed_reason_of $GATED)\" = Placed ]"
+
+echo "### criterion 19 (delete): deleting the definition while instances exist on every member holds it in Terminating; it is released once they are gone"
+hub delete frgd "$GEN" --wait=false >/dev/null
+wait_for 60 "Deleting=False/BlockedByInstances naming all three members" bash -c "frgd_reason_is $GEN Deleting BlockedByInstances && frgd_cond $GEN Deleting message | grep -q '$M1 (1 instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M2 (1 instance(s))' && frgd_cond $GEN Deleting message | grep -q '$M3 (1 instance(s))'"
+[ -n "$(hub get frgd "$GEN" -o jsonpath='{.metadata.deletionTimestamp}')" ] || fail "the wrapper must be Terminating (finalizer held)"
+for m in "$M1" "$M2" "$M3"; do
+  [ "$(member_rgd_state "$m" "$GEN")" = "Active" ] || fail "the definition must stay Active on $m while its instance exists"
+  member "$m" get genaiservice "$GATED" -n "$WORKLOAD_NS" >/dev/null || fail "the instance on $m must be untouched by the refused removal"
+done
+echo "    ok: refused on all three; nothing removed"
+hub delete fgs "$GATED" -n "$WORKLOAD_NS" --timeout=180s >/dev/null
+wait_gone 180 "wrapper released once its last instance is gone" hub get frgd "$GEN"
+for m in "$M1" "$M2" "$M3"; do wait_gone 120 "definition removed from $m" member "$m" get rgd "$GEN"; done
+echo "### finally: restore the GenAIService definition (config/fleet-rgd/) -> distributed and Accepted on all three members again"
+hub apply -f "$REPO_ROOT/config/fleet-rgd/genaiservice-fleet-rgd.yaml" >/dev/null
+wait_for 300 "restored: ${GEN} Accepted 3/3" all_accepted_at "$GEN" "$(frgd_hash "$GEN")" "$M1" "$M2" "$M3"
+fi  # E2E_FROM
 
 echo
-echo "### e2e PASSED: all twelve success criteria hold"
+echo "### e2e PASSED: all twenty success criteria hold"

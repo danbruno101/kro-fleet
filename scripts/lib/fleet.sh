@@ -98,6 +98,41 @@ EOF
 )" >/dev/null
 }
 
+# fleet::wait_until <timeout-seconds> <description> <command...> — poll until the command succeeds.
+fleet::wait_until() {
+  local timeout=$1 desc=$2; shift 2
+  local deadline=$(( $(date +%s) + timeout ))
+  until "$@" >/dev/null 2>&1; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then echo "!!! timed out waiting for: $desc" >&2; return 1; fi
+    sleep 3
+  done
+  fleet::log "ok: $desc"
+}
+
+# fleet::apply_definitions — the fleet definitions (config/fleet-rgd/), authored
+# once on the hub as FleetResourceGraphDefinitions. The fleet controller hands
+# each registered member a plain ResourceGraphDefinition; stock kro there
+# accepts it. Nothing is applied to members by hand any more.
+fleet::apply_definitions() {
+  fleet::log "applying the fleet definitions (config/fleet-rgd/: GenAIService + ClusterPlatform) to the hub"
+  fleet::hub apply -f "${REPO_ROOT}/config/fleet-rgd/"
+}
+
+# fleet::definitions_accepted — true when the hub reports every targeted member's
+# kro Active on both fleet definitions (condition Accepted=True).
+fleet::definitions_accepted() {
+  local d
+  for d in genaiservice.kro.run clusterplatform.kro.run; do
+    [ "$(fleet::hub get frgd "$d" -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null)" = "True" ] || return 1
+  done
+}
+
+# fleet::member_definition_active <context> <definition-name> — the member's own
+# kro reports the distributed ResourceGraphDefinition Active.
+fleet::member_definition_active() {
+  [ "$(kubectl --context "$1" get rgd "$2" -o jsonpath='{.status.state}' 2>/dev/null)" = "Active" ]
+}
+
 # fleet::deregister_member <profile-name> — remove the ClusterProfile (and its Secret).
 fleet::deregister_member() {
   local name=$1

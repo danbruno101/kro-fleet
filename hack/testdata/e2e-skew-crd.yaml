@@ -1,0 +1,31 @@
+# A deliberately trivial CRD used by scripts/e2e.sh (criterion 20, version
+# skew) to make ONE member unable to accept a distributed definition: the
+# e2e installs it on two of the three members, then adds a resource of this
+# kind to the GenAIService definition. The member without the CRD rejects the
+# graph (its kro reports GraphAccepted=False with "no matches for kind"), the
+# others accept it, and the hub shows exactly that — per-cluster graph
+# acceptance by construction. Never installed by setup-fleet.sh.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: skewmarkers.skew.e2e.example.com
+spec:
+  group: skew.e2e.example.com
+  scope: Namespaced
+  names:
+    kind: SkewMarker
+    plural: skewmarkers
+    singular: skewmarker
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                note:
+                  type: string

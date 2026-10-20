@@ -120,13 +120,16 @@ EOF"
   pause
 fi
 
-if step "apply the platform layer" "The same RGDs on every cloud; the ONLY per-cloud file is the platform config: storage class, load balancer flavor, identity, what backs 'gpu'."; then
+if step "apply the platform layer" "The same definitions on every cloud, authored ONCE on the hub; the ONLY per-cloud file is the platform config: storage class, load balancer flavor, identity, what backs 'gpu'."; then
   run_sh "diff --color=always -y -W 140 '${REPO_ROOT}/config/clouds/gke/platform.yaml' '${REPO_ROOT}/config/clouds/eks/platform.yaml' | grep -vE '^#' | head -40 || true"
+  say "the two ResourceGraphDefinitions (GenAIService, ClusterPlatform) are authored once on the hub as FleetResourceGraphDefinitions; kro-fleet hands each cloud a plain RGD and each cloud's stock kro accepts it"
+  run kubectl --context "$HUB_CTX" apply -f "${REPO_ROOT}/config/fleet-rgd/"
+  run_sh "kubectl --context '$HUB_CTX' wait frgd/genaiservice.kro.run frgd/clusterplatform.kro.run --for=condition=Accepted=True --timeout=300s"
+  run kubectl --context "$HUB_CTX" get frgd
   for c in $CLOUDS; do
     ctx="$(demo::ctx_of "$c")"
-    say "${c}: RGDs (GenAIService, ClusterPlatform) + this cloud's platform config (${MODE})"
-    run kubectl --context "$ctx" apply -f "${REPO_ROOT}/config/rgd/"
-    run_sh "kubectl --context '$ctx' wait rgd/genaiservice.kro.run rgd/clusterplatform.kro.run --for=jsonpath='{.status.state}'=Active --timeout=180s"
+    say "${c}: this cloud's platform config (${MODE}); its kro already serves ClusterPlatform"
+    run_sh "kubectl --context '$ctx' get rgd genaiservice.kro.run clusterplatform.kro.run"
     mkdir -p "$STATE_DIR"; demo::render "${REPO_ROOT}/config/clouds/${c}/platform.yaml" > "${STATE_DIR}/platform-${c}.yaml"
     run kubectl --context "$ctx" apply -f "${STATE_DIR}/platform-${c}.yaml"
     run_sh "kubectl --context '$ctx' -n '$WORKLOAD_NS' wait clusterplatform/platform --for=jsonpath='{.status.state}'=ACTIVE --timeout=180s"
